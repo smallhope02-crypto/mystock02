@@ -39,11 +39,30 @@ class KiwoomOpenAPI(QAxWidget if QAxWidget else object):
             logger.info("KiwoomOpenAPI unavailable (platform/import) – falling back to dummy mode")
             return
 
-        super().__init__("KHOPENAPI.KHOpenAPICtrl.1")  # type: ignore[misc]
-        # Event handlers
-        self.OnEventConnect.connect(self._on_event_connect)  # type: ignore[attr-defined]
-        self.OnReceiveConditionVer.connect(self._on_receive_condition_ver)  # type: ignore[attr-defined]
-        self.OnReceiveTrCondition.connect(self._on_receive_tr_condition)  # type: ignore[attr-defined]
+        try:
+            super().__init__("KHOPENAPI.KHOpenAPICtrl.1")  # type: ignore[misc]
+        except Exception as exc:  # pragma: no cover - Windows runtime dependent
+            logger.exception("Failed to instantiate KHOpenAPI control: %s", exc)
+            self.available = False
+            return
+
+        # Event handlers (some environments may not expose these attributes; guard them)
+        try:
+            if hasattr(self, "OnEventConnect"):
+                self.OnEventConnect.connect(self._on_event_connect)  # type: ignore[attr-defined]
+            else:
+                raise AttributeError("OnEventConnect not available")
+            if hasattr(self, "OnReceiveConditionVer"):
+                self.OnReceiveConditionVer.connect(self._on_receive_condition_ver)  # type: ignore[attr-defined]
+            else:
+                raise AttributeError("OnReceiveConditionVer not available")
+            if hasattr(self, "OnReceiveTrCondition"):
+                self.OnReceiveTrCondition.connect(self._on_receive_tr_condition)  # type: ignore[attr-defined]
+            else:
+                raise AttributeError("OnReceiveTrCondition not available")
+        except Exception as exc:  # pragma: no cover - Windows runtime dependent
+            logger.exception("Failed to bind OpenAPI events: %s", exc)
+            self.available = False
 
     # -- Connection -----------------------------------------------------
     def connect(self) -> None:

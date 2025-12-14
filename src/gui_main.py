@@ -345,6 +345,10 @@ class MainWindow(QMainWindow):
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
+            try:
+                self.openapi_widget.login_result.disconnect()
+            except Exception:
+                pass
             self.openapi_widget.login_result.connect(self._on_openapi_login_result)
             self._log("[DEBUG] login_result 시그널을 _on_openapi_login_result 슬롯에 연결했습니다.")
         if self.openapi_widget and hasattr(self.openapi_widget, "condition_ver_received"):

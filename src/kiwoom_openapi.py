@@ -98,7 +98,13 @@ if not QAX_AVAILABLE:  # pragma: no cover - fallback path
 else:
 
     class KiwoomOpenAPI(QAxWidget):  # pragma: no cover - GUI/runtime heavy
-        """QAx-hosted KHOpenAPI control with signal wiring and helpers."""
+        """QAx-hosted KHOpenAPI control with signal wiring and helpers.
+
+        ``login_result`` is a plain ``pyqtSignal(int)`` that mirrors the
+        ``OnEventConnect`` callback.  It intentionally has a single signature
+        to avoid the overload-indexing (`signal[int]`) that previously caused
+        ``connect() failed`` errors in the GUI.
+        """
 
         login_result = pyqtSignal(int)
         condition_ver_received = pyqtSignal(int, str)
@@ -316,9 +322,15 @@ else:
 
         # -- Event handlers ---------------------------------------------
         def _on_event_connect(self, err_code: int) -> None:
-            self.connected = err_code == 0
-            print(f"[OpenAPI] OnEventConnect err_code={err_code} enabled={self.enabled}")
-            self.login_result.emit(err_code)
+            """Handle Kiwoom OnEventConnect and relay as a single int signal."""
+
+            try:
+                ec = int(err_code)
+            except Exception:
+                ec = -1
+            self.connected = ec == 0
+            print(f"[OpenAPI] OnEventConnect err_code={ec} enabled={self.enabled}")
+            self.login_result.emit(ec)
             if self.connected:
                 self.load_conditions()
 

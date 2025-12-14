@@ -188,10 +188,10 @@ class KiwoomClient:
             self.use_openapi = False
             return
         self.openapi.initialize_control()
-        if not self.openapi.available:
+        if not self.openapi.is_enabled():
             self.use_openapi = False
             return
-        self.openapi.login()
+        self.openapi.connect_for_conditions()
         self.use_openapi = self.openapi.is_openapi_connected()
         if self.use_openapi:
             # 로그인 이벤트에서 조건 로딩을 시작하지만, 즉시 호출해도 안전하다.

@@ -350,24 +350,22 @@ class MainWindow(QMainWindow):
 
     def _on_openapi_login(self) -> None:
         try:
-            self._log("[조건] 로그인 버튼 클릭 - 컨트롤 초기화 확인")
-            self._log("[조건] CommConnect 호출 시도")
-            self.kiwoom_client.openapi_login_and_load_conditions()
+            self._log("[조건] 로그인 버튼 클릭 - OpenAPI 상태 확인")
             openapi = self.kiwoom_client.openapi
             if not openapi:
                 self._log("[조건] OpenAPI 래퍼가 없습니다. (초기화 실패)")
                 return
-            if not getattr(openapi, "_enabled", False):
-                self._log("[조건] OpenAPI 래퍼가 비활성 상태입니다. 컨트롤 생성 실패 여부를 콘솔에서 확인하세요.")
-                return
-            if openapi.available:
-                if openapi.connected:
-                    self._log("[조건] OpenAPI 로그인 완료 - 조건식 로딩 시도")
-                    self._refresh_condition_list()
-                else:
-                    self._log("OpenAPI 로그인 후 다시 시도해 주세요.")
-            else:
+            openapi.initialize_control()
+            if not openapi.is_enabled():
                 self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
+                return
+            self._log("[조건] CommConnect 호출 시도")
+            openapi.connect_for_conditions()
+            if not openapi.is_openapi_connected():
+                self._log("[조건] OpenAPI 로그인 완료 여부는 이벤트 수신 후 결정됩니다. 콘솔 로그를 확인하세요.")
+            if openapi.connected:
+                self._log("[조건] OpenAPI 로그인 완료 - 조건식 로딩 시도")
+                self._refresh_condition_list()
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self._log(f"조건식 로그인 실패: {exc}")
 
@@ -527,7 +525,11 @@ class MainWindow(QMainWindow):
         self.condition_map.clear()
         openapi = getattr(self.kiwoom_client, "openapi", None)
 
-        if not openapi or not openapi.available:
+        if not openapi:
+            self.condition_combo.addItem("(조건식 기능 비활성)")
+            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 래퍼 미생성)")
+            return
+        if not openapi.is_enabled():
             self.condition_combo.addItem("(조건식 기능 비활성)")
             self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
             return

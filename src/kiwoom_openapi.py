@@ -13,14 +13,15 @@ import traceback
 from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - platform specific
-    from win32com.client import DispatchWithEvents
+    from win32com.client import Dispatch, DispatchWithEvents
 except ImportError:  # pragma: no cover - expected on non-Windows
+    Dispatch = None  # type: ignore[misc]
     DispatchWithEvents = None  # type: ignore[misc]
 
 logger = logging.getLogger(__name__)
 
 
-class _KiwoomEventHandler:
+class KiwoomEventHandler:
     """Pure-Python COM event sink used by ``DispatchWithEvents``.
 
     **Important**: Do **not** inherit from QObject/PyQt types. ``DispatchWithEvents``
@@ -30,12 +31,10 @@ class _KiwoomEventHandler:
     attached after creation via ``handler._owner = <KiwoomOpenAPI>``.
     """
 
-    _owner: Optional["KiwoomOpenAPI"] = None
-
     def __init__(self):
         # ``DispatchWithEvents`` expects a zero-arg initializer. Owner is injected
         # after creation to avoid metaclass conflicts with PyQt/QObject.
-        self._owner = None
+        self._owner: Optional["KiwoomOpenAPI"] = None
 
     def set_owner(self, owner: "KiwoomOpenAPI") -> None:
         """Attach the outer wrapper after COM object creation."""
@@ -44,15 +43,15 @@ class _KiwoomEventHandler:
 
     def OnEventConnect(self, err_code):  # pragma: no cover - runtime callback
         if self._owner:
-            self._owner._handle_event_connect(err_code)
+            self._owner._on_event_connect(err_code)
 
     def OnReceiveConditionVer(self, lRet, sMsg):  # pragma: no cover - runtime callback
         if self._owner:
-            self._owner._handle_condition_ver(lRet, sMsg)
+            self._owner._on_receive_condition_ver(lRet, sMsg)
 
     def OnReceiveTrCondition(self, screen_no, code_list, condition_name, index, next_):  # pragma: no cover - runtime callback
         if self._owner:
-            self._owner._handle_tr_condition(screen_no, code_list, condition_name, index, next_)
+            self._owner._on_receive_tr_condition(screen_no, code_list, condition_name, index, next_)
 
 
 class KiwoomOpenAPI:
@@ -83,7 +82,8 @@ class KiwoomOpenAPI:
         if self._control is not None or not (DispatchWithEvents and sys.platform.startswith("win")):
             return
         try:
-            control = DispatchWithEvents("KHOPENAPI.KHOpenAPICtrl.1", _KiwoomEventHandler)
+            print("[OpenAPI] Trying DispatchWithEvents('KHOPENAPI.KHOpenAPICtrl.1', KiwoomEventHandler)")
+            control = DispatchWithEvents("KHOPENAPI.KHOpenAPICtrl.1", KiwoomEventHandler)
             try:
                 # ``DispatchWithEvents`` returns an instance of a dynamically
                 # generated class. We inject the owner via helper to keep the
@@ -94,6 +94,7 @@ class KiwoomOpenAPI:
             self._control = control
             self.available = True
             self._enabled = True
+            print("[OpenAPI] KHOpenAPI control created and events bound successfully.")
             logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
         except Exception as exc:  # pragma: no cover - Windows runtime dependent
             # 디버깅을 위해 콘솔에 전체 Traceback 을 출력한다.
@@ -104,19 +105,34 @@ class KiwoomOpenAPI:
             self._enabled = False
             self._control = None
 
+    def is_enabled(self) -> bool:
+        """Return True when the COM control was created successfully."""
+
+        return bool(self._enabled and self._control is not None)
+
     # -- Connection -----------------------------------------------------
     def login(self) -> None:
         """Show the OpenAPI login dialog (CommConnect)."""
 
-        if not self.available:
+        if not self.available or not self.is_enabled():
             logger.warning("[OpenAPI] 컨트롤이 비활성 상태입니다. 로그인 불가")
             return
         try:
+            print("[OpenAPI] Calling CommConnect() for condition login")
             self._control.CommConnect()
             logger.info("[OpenAPI] 로그인 시도")
         except Exception as exc:  # pragma: no cover - runtime dependent
             logger.exception("[OpenAPI] CommConnect 호출 실패: %s", exc)
             self.connected = False
+
+    def connect_for_conditions(self) -> None:
+        """Explicit helper for condition login path used by the GUI."""
+
+        if not self.is_enabled():
+            print("[OpenAPI] connect_for_conditions called but control is disabled")
+            logger.warning("[OpenAPI] connect_for_conditions: control disabled")
+            return
+        self.login()
 
     def is_openapi_connected(self) -> bool:
         """Return True when OpenAPI login succeeded."""
@@ -189,7 +205,7 @@ class KiwoomOpenAPI:
         return list(self.last_universe)
 
     # -- Event handlers (called from COM sink) --------------------------
-    def _handle_event_connect(self, err_code: int) -> None:
+    def _on_event_connect(self, err_code: int) -> None:
         self.connected = err_code == 0
         self.available = self.available and self._enabled
         print(f"[OpenAPI] OnEventConnect err_code={err_code} enabled={self._enabled}")
@@ -200,7 +216,7 @@ class KiwoomOpenAPI:
             self.conditions_loaded = False
             logger.warning("[OpenAPI] 로그인 실패 (err_code=%s)", err_code)
 
-    def _handle_condition_ver(self, lRet: int, sMsg: str) -> None:
+    def _on_receive_condition_ver(self, lRet: int, sMsg: str) -> None:
         logger.info("[OpenAPI] 조건식 버전 수신: ret=%s msg=%s", lRet, sMsg)
         print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
         if lRet == 1:
@@ -211,7 +227,7 @@ class KiwoomOpenAPI:
             self.conditions_loaded = False
             logger.warning("[OpenAPI] 조건식 버전 수신 실패")
 
-    def _handle_tr_condition(
+    def _on_receive_tr_condition(
         self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str
     ) -> None:
         logger.info(

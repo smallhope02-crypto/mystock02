@@ -6,7 +6,6 @@
 +so that the ``src`` package is importable when the project is unpacked from a
 +zip archive.
 +"""
-+from __future__ import annotations
 +
 +import sys
 +from pathlib import Path

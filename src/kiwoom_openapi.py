@@ -14,10 +14,12 @@ from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - platform specific
     from win32com.client import Dispatch, DispatchWithEvents, WithEvents
-except ImportError:  # pragma: no cover - expected on non-Windows
+    _DISPATCH_IMPORT_ERROR: Optional[ImportError] = None
+except ImportError as import_error:  # pragma: no cover - expected on non-Windows
     Dispatch = None  # type: ignore[misc]
     DispatchWithEvents = None  # type: ignore[misc]
     WithEvents = None  # type: ignore[misc]
+    _DISPATCH_IMPORT_ERROR = import_error
 
 logger = logging.getLogger(__name__)
 
@@ -92,22 +94,25 @@ class KiwoomOpenAPI:
             logger.info("[OpenAPI] Non-Windows platform detected; disabling")
             return
         if Dispatch is None:
-            self._init_error = RuntimeError("win32com Dispatch 불가")
+            # Preserve the original ImportError so users can diagnose missing
+            # win32com installations instead of seeing a wrapped RuntimeError.
+            self._init_error = _DISPATCH_IMPORT_ERROR
             self._enabled = False
             self.available = False
-            print("[OpenAPI] win32com Dispatch 불가", flush=True)
+            print("[OpenAPI] win32com Dispatch import 실패:", repr(_DISPATCH_IMPORT_ERROR), flush=True)
             return
 
         # 1단계: 기본 COM 컨트롤 생성
         try:
+            print("[OpenAPI] trying Dispatch KHOPENAPI.KHOpenAPICtrl.1", flush=True)
             base = Dispatch("KHOPENAPI.KHOpenAPICtrl.1")
-            print("[OpenAPI] Dispatch('KHOPENAPI.KHOpenAPICtrl.1') 성공", flush=True)
+            print("[OpenAPI] Dispatch OK:", type(base), flush=True)
         except Exception as exc:  # pragma: no cover - Windows runtime dependent
             self._control = None
             self._enabled = False
             self.available = False
             self._init_error = exc
-            print("[OpenAPI] KHOPENAPI Dispatch 실패:", repr(exc))
+            print("[OpenAPI] Dispatch error(raw):", repr(exc))
             traceback.print_exc()
             logger.exception("[OpenAPI] KHOPENAPI Dispatch 실패: %s", exc)
             return

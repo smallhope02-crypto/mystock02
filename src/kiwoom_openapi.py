@@ -199,14 +199,16 @@ class KiwoomOpenAPI:
             print(f"[OpenAPI] CommConnect() 호출 완료 (context={context}, 이벤트 대기)")
             return True
         except Exception as exc:  # pragma: no cover - runtime dependent
-            # Preserve pywintypes.com_error or other exceptions for diagnostics
+            # Preserve pywintypes.com_error or other exceptions for diagnostics.
+            # Avoid raising so GUI callers never see an uncaught traceback.
             self._init_error = exc
             self.connected = False
             if pywintypes and isinstance(exc, pywintypes.com_error):
                 print(f"[OpenAPI] CommConnect pywintypes.com_error in {context}: {repr(exc)}")
+                logger.error("[OpenAPI] CommConnect pywintypes.com_error in %s: %s", context, exc)
             else:
                 print(f"[OpenAPI] CommConnect 예외 발생 in {context}: {repr(exc)}")
-            logger.exception("[OpenAPI] CommConnect 호출 실패: %s", exc)
+                logger.error("[OpenAPI] CommConnect 예외 in %s: %s", context, exc)
             return False
 
     def login(self) -> bool:

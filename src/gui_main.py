@@ -1,26 +1,30 @@
 +"""Minimal PyQt GUI wiring paper/real modes and strategy parameters."""
-+from __future__ import annotations
 +
 +import logging
 +from typing import List
 +
-+from PyQt5.QtCore import Qt
-+from PyQt5.QtWidgets import (
-+    QApplication,
-+    QButtonGroup,
-+    QDoubleSpinBox,
-+    QHBoxLayout,
-+    QLabel,
-+    QLineEdit,
-+    QMainWindow,
-+    QPushButton,
-+    QRadioButton,
-+    QSpinBox,
-+    QTableWidget,
-+    QTableWidgetItem,
-+    QVBoxLayout,
-+    QWidget,
-+)
++try:
++    from PyQt5.QtCore import Qt
++    from PyQt5.QtWidgets import (
++        QApplication,
++        QButtonGroup,
++        QDoubleSpinBox,
++        QHBoxLayout,
++        QLabel,
++        QLineEdit,
++        QMainWindow,
++        QPushButton,
++        QRadioButton,
++        QSpinBox,
++        QTableWidget,
++        QTableWidgetItem,
++        QVBoxLayout,
++        QWidget,
++    )
++except ImportError as exc:  # pragma: no cover - environment may lack PyQt5
++    raise SystemExit(
++        "PyQt5 is required to run the GUI. Install it with 'pip install pyqt5'."
++    ) from exc
 +
 +from .selector import UniverseSelector
 +from .strategy import Strategy

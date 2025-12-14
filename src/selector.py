@@ -3,7 +3,7 @@
 import logging
 import random
 from dataclasses import dataclass
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,19 @@ class UniverseSelector:
     replace the dummy logic with real data (e.g., market breadth, news, flows).
     """
 
-    def __init__(self):
+    def __init__(self, kiwoom_client: Optional[object] = None):
         self.scorers: List[Callable[[List[str]], Dict[str, float]]] = [
             self._score_market_trend,
             self._score_theme_alignment,
             self._score_flow_and_news,
         ]
+        # KiwoomClient is injected lazily to avoid circular imports
+        self.kiwoom_client = kiwoom_client
+
+    def attach_client(self, client: object) -> None:
+        """Attach a KiwoomClient-like object after construction."""
+
+        self.kiwoom_client = client
 
     def select(self, condition_name: str) -> List[str]:
         """Return a sorted universe of symbols for the given condition."""
@@ -48,6 +55,14 @@ class UniverseSelector:
 
         TODO: 실제 API 연동 시 구현
         """
+        if self.kiwoom_client:
+            try:
+                universe = getattr(self.kiwoom_client, "get_condition_universe")(condition_name)
+                if universe:
+                    return universe
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.exception("Kiwoom condition universe failed: %s", exc)
+
         random.seed(condition_name)
         return [f"SYM{num:03d}" for num in random.sample(range(1, 30), 10)]
 

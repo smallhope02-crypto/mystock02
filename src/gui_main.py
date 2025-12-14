@@ -127,12 +127,12 @@ class MainWindow(QMainWindow):
 
         self.current_config = load_config()
         self.strategy = Strategy()
-        self.selector = UniverseSelector()
         self.kiwoom_client = KiwoomClient(
             account_no=self.current_config.account_no,
             app_key=self.current_config.app_key,
             app_secret=self.current_config.app_secret,
         )
+        self.selector = UniverseSelector(kiwoom_client=self.kiwoom_client)
         self.engine = TradeEngine(
             strategy=self.strategy,
             selector=self.selector,
@@ -499,7 +499,7 @@ class MainWindow(QMainWindow):
         if conditions:
             self.condition_combo.addItems(conditions)
         else:
-            self._log("조건식을 불러오지 못했습니다.")
+            self._log("조건식을 불러오지 못했습니다. (OpenAPI 미사용 또는 오류)")
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

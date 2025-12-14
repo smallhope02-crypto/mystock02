@@ -5,10 +5,12 @@ real Kiwoom REST API. For now every call only logs what would happen.
 """
 
 import logging
+import sys
 from dataclasses import dataclass
 from typing import Dict, List
 
 from .config import AppConfig
+from .kiwoom_openapi import KiwoomOpenAPI
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,8 @@ class KiwoomClient:
         self._connected_paper = False
         self._connected_real = False
         self._demo_balance = 1_000_000
+        self.openapi = KiwoomOpenAPI()
+        self.use_openapi = False
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.
@@ -66,6 +70,13 @@ class KiwoomClient:
 
         self._connected_real = True
         logger.info("[REAL MODE] Simulated real login for account %s", self.account_no)
+        if self.openapi.available and sys.platform.startswith("win"):
+            try:
+                self.openapi.connect()
+                self.use_openapi = self.openapi.is_connected()
+            except Exception as exc:  # pragma: no cover - defensive guard for GUI layer
+                logger.exception("OpenAPI connect failed: %s", exc)
+                self.use_openapi = False
         return self._connected_real
 
     def is_connected_paper(self) -> bool:
@@ -119,19 +130,56 @@ class KiwoomClient:
         return {"cash": float(self.get_real_balance())}
 
     def list_conditions(self) -> List[str]:
-        """Return condition names stored in Kiwoom (dummy for now).
+        """Return condition names stored in Kiwoom.
 
-        실제 연동 시에는 키움 OpenAPI(+ 또는 REST)의 "조건식 목록 조회" API를
-        호출해 조건식 이름 리스트를 파싱한 뒤 반환해야 합니다.
+        When OpenAPI is available (Windows + KHOpenAPI installed) this calls
+        :class:`KiwoomOpenAPI` to load and parse the 0150 조건식 목록. The
+        current demo implementation falls back to dummy values when running in
+        CI or non-Windows environments.
 
         TODO: 실제 API 연동 시 구현
         - 필요 파라미터 예시: app_key, app_secret, account_no, access_token 등
         - 응답 데이터에서 조건식 이름 배열을 추출해 리스트로 변환
+        - OpenAPI 환경에서는 비동기 응답을 기다리는 시그널/슬롯 설계 필요
         """
+
+        if self.use_openapi and self.openapi.available:
+            try:
+                self.openapi.request_condition_list()
+                names = self.openapi.get_condition_list()
+                if names:
+                    return names
+            except Exception as exc:  # pragma: no cover - optional path
+                logger.exception("OpenAPI condition list failed: %s", exc)
 
         # 더미 구현: 실제 API가 붙기 전까지는 하드코딩된 목록을 반환합니다.
         dummy_conditions = ["단기급등_체크", "돌파_추세", "장중급락_반등"]
         return dummy_conditions
+
+    def get_condition_universe(self, condition_name: str) -> List[str]:
+        """Return symbols matching the given condition name.
+
+        When OpenAPI is active, this looks up the condition index and sends a
+        ``SendCondition`` request before returning the last received universe.
+        The demo environment falls back to a static set of tickers.
+
+        TODO: 실사용 시에는 OnReceiveTrCondition 이벤트 완료까지 기다리도록
+        비동기 구조를 적용해야 합니다.
+        """
+
+        if self.use_openapi and self.openapi.available:
+            try:
+                condition_index = next((idx for idx, name in self.openapi.conditions if name == condition_name), None)
+                if condition_index is not None:
+                    self.openapi.request_condition_universe(condition_index, condition_name)
+                    universe = self.openapi.get_last_universe()
+                    if universe:
+                        return universe
+            except Exception as exc:  # pragma: no cover - optional path
+                logger.exception("OpenAPI condition universe failed: %s", exc)
+
+        # 더미 구현: 조건식 이름과 무관하게 테스트용 종목을 반환합니다.
+        return ["005930", "000660", "035420", "068270", "035720"]
 
     def get_condition_list(self) -> List[str]:
         """Deprecated alias kept for backward compatibility."""

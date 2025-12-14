@@ -13,10 +13,11 @@ import traceback
 from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - platform specific
-    from win32com.client import Dispatch, DispatchWithEvents
+    from win32com.client import Dispatch, DispatchWithEvents, WithEvents
 except ImportError:  # pragma: no cover - expected on non-Windows
     Dispatch = None  # type: ignore[misc]
     DispatchWithEvents = None  # type: ignore[misc]
+    WithEvents = None  # type: ignore[misc]
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,8 @@ class KiwoomOpenAPI:
         self._control: Optional[object] = None
         self._init_error: Optional[Exception] = None
 
-        if not (DispatchWithEvents and sys.platform.startswith("win")):
-            logger.info("[OpenAPI] win32com unavailable or non-Windows platform; disabling")
-            return
+        # Control creation is deferred to ``initialize_control`` so GUI code can
+        # retry on demand. We keep the state fields initialized here.
 
     # -- Control setup ---------------------------------------------------
     def initialize_control(self) -> None:
@@ -80,43 +80,88 @@ class KiwoomOpenAPI:
         back without raising.
         """
 
+        print("[OpenAPI] initialize_control invoked", flush=True)
         if self._control is not None:
+            print("[OpenAPI] Control already initialized; skipping")
             return
-        if not (DispatchWithEvents and sys.platform.startswith("win")):
-            print("[OpenAPI] DispatchWithEvents 사용 불가 또는 비윈도우 환경")
-            self._init_error = RuntimeError("DispatchWithEvents unavailable")
-            return
-        try:
-            print("[OpenAPI] Trying DispatchWithEvents('KHOPENAPI.KHOpenAPICtrl.1', KiwoomEventHandler)")
-            control = DispatchWithEvents("KHOPENAPI.KHOpenAPICtrl.1", KiwoomEventHandler)
-            try:
-                # ``DispatchWithEvents`` returns an instance of a dynamically
-                # generated class. We inject the owner via helper to keep the
-                # event handler free of PyQt metaclasses.
-                control.set_owner(self)  # type: ignore[attr-defined]
-            except Exception:
-                logger.warning("[OpenAPI] 이벤트 핸들러에 owner 연결 실패")
-            self._control = control
-            self.available = True
-            self._enabled = True
-            self._init_error = None
-            print("[OpenAPI] KHOpenAPI control created and events bound successfully.")
-            logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
-        except Exception as exc:  # pragma: no cover - Windows runtime dependent
-            # 디버깅을 위해 콘솔에 전체 Traceback 을 출력한다.
-            print("[OpenAPI] 컨트롤 생성 실패:", repr(exc))
-            traceback.print_exc()
-            logger.exception("[OpenAPI] 컨트롤 생성 실패: %s", exc)
-            self.available = False
+
+        if not sys.platform.startswith("win"):
+            self._init_error = RuntimeError("Windows 환경에서만 지원됩니다")
             self._enabled = False
+            self.available = False
+            logger.info("[OpenAPI] Non-Windows platform detected; disabling")
+            return
+        if Dispatch is None:
+            self._init_error = RuntimeError("win32com Dispatch 불가")
+            self._enabled = False
+            self.available = False
+            print("[OpenAPI] win32com Dispatch 불가", flush=True)
+            return
+
+        # 1단계: 기본 COM 컨트롤 생성
+        try:
+            base = Dispatch("KHOPENAPI.KHOpenAPICtrl.1")
+            print("[OpenAPI] Dispatch('KHOPENAPI.KHOpenAPICtrl.1') 성공", flush=True)
+        except Exception as exc:  # pragma: no cover - Windows runtime dependent
             self._control = None
+            self._enabled = False
+            self.available = False
             self._init_error = exc
+            print("[OpenAPI] KHOPENAPI Dispatch 실패:", repr(exc))
+            traceback.print_exc()
+            logger.exception("[OpenAPI] KHOPENAPI Dispatch 실패: %s", exc)
+            return
+
+        # 2단계: 이벤트 바인딩 시도
+        control = None
+        event_error: Optional[Exception] = None
+        try:
+            print("[OpenAPI] DispatchWithEvents 시도", flush=True)
+            control = DispatchWithEvents(base, KiwoomEventHandler)
+        except Exception as exc:  # pragma: no cover - Windows runtime dependent
+            event_error = exc
+            print("[OpenAPI] DispatchWithEvents 실패, WithEvents 폴백 시도:", repr(exc))
+            traceback.print_exc()
+            try:
+                control = WithEvents(base, KiwoomEventHandler) if WithEvents else None
+            except Exception as exc2:  # pragma: no cover - Windows runtime dependent
+                event_error = exc2
+                print("[OpenAPI] WithEvents 폴백도 실패:", repr(exc2))
+                traceback.print_exc()
+
+        if control is None:
+            self._control = None
+            self._enabled = False
+            self.available = False
+            self._init_error = event_error or RuntimeError("이벤트 바인딩 실패")
+            print("[OpenAPI] 이벤트 바인딩 실패로 비활성화됨")
+            return
+
+        # 3단계: 이벤트 핸들러에 owner 연결
+        try:
+            handler = getattr(control, "_eventobj_", None)
+            if isinstance(handler, KiwoomEventHandler):
+                handler._owner = self
+            elif isinstance(control, KiwoomEventHandler):
+                control._owner = self
+            elif hasattr(control, "set_owner"):
+                control.set_owner(self)  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("[OpenAPI] 이벤트 핸들러에 owner 연결 실패")
+
+        # 4단계: 성공 상태 업데이트
+        self._control = control
+        self.available = True
+        self._enabled = True
+        self._init_error = None
+        print("[OpenAPI] KHOpenAPI control created and events bound successfully.")
+        logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
 
     def debug_status(self) -> str:
         """Return a human-readable status string for debugging."""
 
         return (
-            f"enabled={self._enabled}, control={'OK' if self._control is not None else 'None'}, "
+            f"enabled={self._enabled}, available={self.available}, control={'OK' if self._control is not None else 'None'}, "
             f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, "
             f"init_error={repr(self._init_error)}"
         )
@@ -148,8 +193,11 @@ class KiwoomOpenAPI:
         if not self.is_enabled():
             print("[OpenAPI] connect_for_conditions called but control is disabled")
             print(f"[OpenAPI] debug_status: {self.debug_status()}")
-            logger.warning("[OpenAPI] connect_for_conditions: control disabled")
-            return
+            logger.warning("[OpenAPI] connect_for_conditions: control disabled; reinitializing")
+            self.initialize_control()
+            print("[OpenAPI] debug_status after reinit:", self.debug_status())
+            if not self.is_enabled():
+                return
         self.login()
 
     def is_openapi_connected(self) -> bool:

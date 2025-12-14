@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
                 self.kiwoom_client.openapi.debug_status(),
                 flush=True,
             )
+            # 상태가 비활성이라면 사용자 버튼 클릭 시 재초기화를 안내한다.
         self._refresh_condition_list()
         self._refresh_account()
         self._refresh_positions()

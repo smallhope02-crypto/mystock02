@@ -350,18 +350,26 @@ class MainWindow(QMainWindow):
 
     def _on_openapi_login(self) -> None:
         try:
+            self._log("[조건] 로그인 시도 중...")
             self.kiwoom_client.openapi_login_and_load_conditions()
-            if self.kiwoom_client.use_openapi:
-                self._log("OpenAPI 조건식 로그인 및 로딩 완료")
-                self._refresh_condition_list()
+            openapi = self.kiwoom_client.openapi
+            if openapi and openapi.available:
+                if openapi.connected:
+                    self._log("OpenAPI 조건식 로그인 및 로딩 완료")
+                    self._refresh_condition_list()
+                else:
+                    self._log("OpenAPI 로그인 후 다시 시도해 주세요.")
             else:
-                self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 비활성)")
+                self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self._log(f"조건식 로그인 실패: {exc}")
 
     def _selected_condition(self) -> str:
         combo_value = self.condition_combo.currentText().strip()
         if combo_value:
+            mapped = self.condition_map.get(combo_value)
+            if mapped:
+                return mapped[1]
             if ":" in combo_value:
                 _, name = combo_value.split(":", 1)
                 return name.strip()
@@ -507,10 +515,27 @@ class MainWindow(QMainWindow):
         self.positions_table.resizeColumnsToContents()
 
     def _refresh_condition_list(self) -> None:
+        previous = self.condition_combo.currentText()
         self.condition_combo.clear()
         self.condition_map.clear()
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+
+        if not openapi or not openapi.available:
+            self.condition_combo.addItem("(조건식 기능 비활성)")
+            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
+            return
+        if not openapi.connected:
+            self.condition_combo.addItem("(로그인 필요)")
+            self._log("OpenAPI 로그인 후 조건식을 사용할 수 있습니다.")
+            return
+        if not openapi.conditions_loaded:
+            self.condition_combo.addItem("(조건 로딩 중)")
+            openapi.load_conditions()
+            self._log("조건식 정보를 불러오는 중입니다...")
+            return
+
         try:
-            conditions = self.engine.condition_list()
+            conditions = openapi.get_conditions()
         except Exception as exc:  # pragma: no cover - UI fallback
             self._log(f"조건식 목록 조회 실패: {exc}")
             conditions = []
@@ -520,8 +545,12 @@ class MainWindow(QMainWindow):
                 label = f"{idx}: {name}"
                 self.condition_combo.addItem(label)
                 self.condition_map[label] = (idx, name)
+            if previous in self.condition_map:
+                self.condition_combo.setCurrentText(previous)
+            self._log(f"조건식 목록 {len(conditions)}개 로딩 완료")
         else:
-            self._log("조건식을 불러오지 못했습니다. (OpenAPI 미사용 또는 오류)")
+            self.condition_combo.addItem("(조건 없음)")
+            self._log("계정에 등록된 조건식이 없습니다. (0150에서 확인해 주세요)")
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

@@ -74,10 +74,10 @@ class KiwoomClient:
 
         self._connected_real = True
         logger.info("[REAL MODE] Simulated real login for account %s", self.account_no)
-        if self.openapi and self.openapi.available and sys.platform.startswith("win"):
+        if self.openapi and sys.platform.startswith("win"):
             try:
+                self.openapi.initialize_control()
                 self.openapi.login()
-                self.use_openapi = self.openapi.is_openapi_connected()
             except Exception as exc:  # pragma: no cover - defensive guard for GUI layer
                 logger.exception("OpenAPI connect failed: %s", exc)
                 self.use_openapi = False
@@ -145,9 +145,14 @@ class KiwoomClient:
         반환하고, 사용 불가 환경에서는 더미 조건식을 돌려줍니다.
         """
 
-        if self.use_openapi and self.openapi and self.openapi.available:
+        self.use_openapi = bool(
+            self.openapi and self.openapi.available and self.openapi.connected and sys.platform.startswith("win")
+        )
+        if self.use_openapi and self.openapi:
             try:
-                return self.openapi.get_conditions()
+                parsed = self.openapi.get_conditions()
+                if parsed:
+                    return [(int(idx), name) for idx, name in parsed]
             except Exception as exc:  # pragma: no cover - optional path
                 logger.exception("OpenAPI condition list failed: %s", exc)
 
@@ -161,11 +166,16 @@ class KiwoomClient:
     def get_condition_universe(self, condition_name: str) -> List[str]:
         """Return symbols matching the given condition name."""
 
-        if self.use_openapi and self.openapi and self.openapi.available:
+        self.use_openapi = bool(
+            self.openapi and self.openapi.available and self.openapi.connected and sys.platform.startswith("win")
+        )
+        if self.use_openapi and self.openapi:
             try:
-                condition_index = next((idx for idx, name in self.openapi.get_conditions() if name == condition_name), None)
+                condition_index = next(
+                    (idx for idx, name in self.openapi.get_conditions() if name == condition_name), None
+                )
                 if condition_index is not None:
-                    return self.openapi.request_condition_universe(condition_index, condition_name)
+                    return self.openapi.request_condition_universe(int(condition_index), condition_name)
             except Exception as exc:  # pragma: no cover - optional path
                 logger.exception("OpenAPI condition universe failed: %s", exc)
 
@@ -174,14 +184,18 @@ class KiwoomClient:
     def openapi_login_and_load_conditions(self) -> None:
         """Perform OpenAPI login and condition load sequence for the GUI."""
 
-        if not self.openapi or not self.openapi.available:
+        if not self.openapi:
+            self.use_openapi = False
+            return
+        self.openapi.initialize_control()
+        if not self.openapi.available:
             self.use_openapi = False
             return
         self.openapi.login()
         self.use_openapi = self.openapi.is_openapi_connected()
-        if not self.use_openapi:
-            return
-        self.openapi.load_conditions()
+        if self.use_openapi:
+            # 로그인 이벤트에서 조건 로딩을 시작하지만, 즉시 호출해도 안전하다.
+            self.openapi.load_conditions()
 
     def send_buy_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
         logger.info("[REAL MODE] Would send buy order: %s x%d at %.2f", symbol, quantity, price)

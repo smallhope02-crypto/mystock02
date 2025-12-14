@@ -1,138 +1,165 @@
-"""Kiwoom OpenAPI+ thin wrapper with safe fallbacks for non-Windows environments.
+"""Kiwoom OpenAPI+ wrapper with COM events and safe fallbacks.
 
-This module keeps the event-driven QAxWidget-based interface that works on
-Windows with Kiwoom OpenAPI+ installed. When PyQt5's QAxContainer is not
-available (e.g., Linux CI), the same class name is provided with
-``available=False`` so higher-level code can silently fall back to dummy logic.
+This module uses ``win32com.client.DispatchWithEvents`` to subscribe to
+``OnEventConnect``, ``OnReceiveConditionVer``, and ``OnReceiveTrCondition``
+events. When the KHOpenAPI control cannot be created (non-Windows or missing
+OpenAPI install), the wrapper stays disabled so higher-level code can fall back
+without crashing.
 """
 
-import importlib.util
 import logging
 import sys
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+try:  # pragma: no cover - platform specific
+    from win32com.client import DispatchWithEvents
+except ImportError:  # pragma: no cover - expected on non-Windows
+    DispatchWithEvents = None  # type: ignore[misc]
 
 logger = logging.getLogger(__name__)
 
-_PYQT_SPEC = importlib.util.find_spec("PyQt5")
-_QAX_SPEC = importlib.util.find_spec("PyQt5.QAxContainer") if _PYQT_SPEC else None
-if _QAX_SPEC:
-    from PyQt5.QAxContainer import QAxWidget
-else:
-    QAxWidget = None  # type: ignore[misc]
+
+class _KiwoomEventHandler:
+    """Event sink passed to ``DispatchWithEvents``.
+
+    The outer :class:`KiwoomOpenAPI` instance is injected so we can mutate
+    connection state and trigger follow-up requests.
+    """
+
+    def __init__(self, outer: "KiwoomOpenAPI"):
+        self.outer = outer
+
+    def OnEventConnect(self, err_code):  # pragma: no cover - runtime callback
+        self.outer.connected = err_code == 0
+        if self.outer.connected:
+            self.outer.available = True
+            logger.info("[OpenAPI] 로그인 성공 (err_code=%s)", err_code)
+            # 로그인 성공 시 바로 조건식 로딩을 시작한다.
+            self.outer.load_conditions()
+        else:
+            self.outer.conditions_loaded = False
+            logger.warning("[OpenAPI] 로그인 실패 (err_code=%s)", err_code)
+
+    def OnReceiveConditionVer(self, lRet, sMsg):  # pragma: no cover - runtime callback
+        logger.info("[OpenAPI] 조건식 버전 수신: ret=%s msg=%s", lRet, sMsg)
+        if lRet == 1:
+            self.outer.fetch_condition_list()
+            logger.info("[OpenAPI] 조건식 %d개 로딩 완료", len(self.outer.conditions))
+        else:
+            self.outer.conditions_loaded = False
+            logger.warning("[OpenAPI] 조건식 버전 수신 실패")
+
+    def OnReceiveTrCondition(self, screen_no, code_list, condition_name, index, next_):  # pragma: no cover - runtime callback
+        logger.info(
+            "[OpenAPI] 조건식 종목 수신 screen=%s condition=%s index=%s next=%s",
+            screen_no,
+            condition_name,
+            index,
+            next_,
+        )
+        self.outer.last_universe = [code for code in str(code_list).split(";") if code]
 
 
-class KiwoomOpenAPI(QAxWidget if QAxWidget else object):
+class KiwoomOpenAPI:
     """Safe wrapper around KHOpenAPI control with condition search helpers."""
 
     def __init__(self):
-        self.available: bool = bool(QAxWidget) and sys.platform.startswith("win")
-        self.is_connected: bool = False
-        self.conditions: List[Tuple[int, str]] = []
+        self.available: bool = False
+        self.connected: bool = False
         self.conditions_loaded: bool = False
+        self.conditions: List[Tuple[str, str]] = []
         self.last_universe: List[str] = []
         self.screen_no: str = "9000"
+        self._control: Optional[object] = None
 
-        if not self.available:
-            logger.info("KiwoomOpenAPI unavailable (platform/import) – falling back to dummy mode")
+        if not (DispatchWithEvents and sys.platform.startswith("win")):
+            logger.info("[OpenAPI] win32com unavailable or non-Windows platform; disabling")
             return
 
-        try:
-            super().__init__("KHOPENAPI.KHOpenAPICtrl.1")  # type: ignore[misc]
-        except Exception as exc:  # pragma: no cover - Windows runtime dependent
-            logger.exception("Failed to instantiate KHOpenAPI control: %s", exc)
-            self.available = False
-            return
+    # -- Control setup ---------------------------------------------------
+    def initialize_control(self) -> None:
+        """Create the KHOpenAPI control and bind events.
 
+        Control creation errors leave ``available=False`` so callers can fall
+        back without raising.
+        """
+
+        if self._control is not None or not (DispatchWithEvents and sys.platform.startswith("win")):
+            return
         try:
-            if hasattr(self, "OnEventConnect"):
-                self.OnEventConnect.connect(self._on_event_connect)  # type: ignore[attr-defined]
-            else:
-                raise AttributeError("OnEventConnect not available")
-            if hasattr(self, "OnReceiveConditionVer"):
-                self.OnReceiveConditionVer.connect(self._on_receive_condition_ver)  # type: ignore[attr-defined]
-            else:
-                raise AttributeError("OnReceiveConditionVer not available")
-            if hasattr(self, "OnReceiveTrCondition"):
-                self.OnReceiveTrCondition.connect(self._on_receive_tr_condition)  # type: ignore[attr-defined]
-            else:
-                raise AttributeError("OnReceiveTrCondition not available")
+            self._control = DispatchWithEvents(
+                "KHOPENAPI.KHOpenAPICtrl.1", lambda: _KiwoomEventHandler(self)
+            )
+            self.available = True
+            logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
         except Exception as exc:  # pragma: no cover - Windows runtime dependent
-            logger.exception("Failed to bind OpenAPI events: %s", exc)
+            logger.exception("[OpenAPI] 컨트롤 생성 실패: %s", exc)
             self.available = False
+            self._control = None
 
     # -- Connection -----------------------------------------------------
     def login(self) -> None:
-        """Open the OpenAPI login window and wait for ``OnEventConnect``.
-
-        TODO: 실사용 시에는 UI 스레드에서 호출하고 이벤트 완료까지 대기하는
-        비동기/시그널 구조로 보완해야 합니다.
-        """
+        """Show the OpenAPI login dialog (CommConnect)."""
 
         if not self.available:
+            logger.warning("[OpenAPI] 컨트롤이 비활성 상태입니다. 로그인 불가")
             return
         try:
-            self.dynamicCall("CommConnect()")  # type: ignore[attr-defined]
-        except Exception as exc:  # pragma: no cover - GUI/runtime dependent
-            logger.exception("CommConnect failed: %s", exc)
-            self.is_connected = False
+            self._control.CommConnect()
+            logger.info("[OpenAPI] 로그인 시도")
+        except Exception as exc:  # pragma: no cover - runtime dependent
+            logger.exception("[OpenAPI] CommConnect 호출 실패: %s", exc)
+            self.connected = False
 
     def is_openapi_connected(self) -> bool:
         """Return True when OpenAPI login succeeded."""
 
-        return self.available and self.is_connected
-
-    def _on_event_connect(self, err_code: int) -> None:
-        logger.info("OpenAPI connect result: %s", err_code)
-        self.is_connected = err_code == 0
+        return self.available and self.connected
 
     # -- Condition list -------------------------------------------------
     def load_conditions(self) -> None:
         """Request condition list loading (0150 조건식)."""
 
-        if not self.available or not self.is_connected:
+        if not (self.available and self.connected and self._control):
+            logger.warning("[OpenAPI] 로그인 후 조건 로딩을 시도하세요")
             return
         try:
-            self.dynamicCall("GetConditionLoad()")  # type: ignore[attr-defined]
+            self._control.GetConditionLoad()
+            logger.info("[OpenAPI] 조건식 로딩 요청")
         except Exception as exc:  # pragma: no cover - GUI/runtime dependent
-            logger.exception("GetConditionLoad failed: %s", exc)
+            logger.exception("[OpenAPI] GetConditionLoad 실패: %s", exc)
 
-    def _fetch_condition_list(self) -> None:
+    def fetch_condition_list(self) -> None:
         """Parse condition names from the control and cache them."""
 
+        if not (self.available and self.connected and self._control):
+            return
         try:
-            raw_list: str = self.dynamicCall("GetConditionNameList()")  # type: ignore[attr-defined]
+            raw_list = self._control.GetConditionNameList()
         except Exception as exc:  # pragma: no cover - GUI/runtime dependent
-            logger.exception("GetConditionNameList failed: %s", exc)
+            logger.exception("[OpenAPI] GetConditionNameList 실패: %s", exc)
             self.conditions = []
             self.conditions_loaded = False
             return
 
-        parsed: List[Tuple[int, str]] = []
-        for block in raw_list.split(";"):
+        parsed: List[Tuple[str, str]] = []
+        for block in str(raw_list).split(";"):
             if not block:
                 continue
             try:
                 idx_str, name = block.split("^")
-                parsed.append((int(idx_str), name))
+                parsed.append((idx_str, name))
             except ValueError:
-                logger.warning("Could not parse condition block: %s", block)
+                logger.warning("[OpenAPI] 조건식 파싱 실패: %s", block)
         self.conditions = parsed
         self.conditions_loaded = True
 
-    def get_conditions(self) -> List[Tuple[int, str]]:
+    def get_conditions(self) -> List[Tuple[str, str]]:
         """Return parsed condition tuples or an empty list when unavailable."""
 
         if not self.available or not self.conditions_loaded:
             return []
         return list(self.conditions)
-
-    def _on_receive_condition_ver(self, ret: int, msg: str) -> None:
-        logger.info("Condition list received: ret=%s msg=%s", ret, msg)
-        if ret != 1:
-            self.conditions = []
-            self.conditions_loaded = False
-            return
-        self._fetch_condition_list()
 
     # -- Condition universe ---------------------------------------------
     def request_condition_universe(self, condition_index: int, condition_name: str, market: str = "0") -> List[str]:
@@ -141,29 +168,18 @@ class KiwoomOpenAPI(QAxWidget if QAxWidget else object):
         TODO: 실사용 시에는 OnReceiveTrCondition 이벤트에서 비동기 응답을 기다려야 합니다.
         """
 
-        if not self.available or not self.is_connected or not self.conditions_loaded:
+        if not (self.available and self.connected and self.conditions_loaded and self._control):
+            logger.warning("[OpenAPI] 조건식 조회 불가 (로그인/로딩 상태 확인)")
             return []
         try:
-            self.dynamicCall(
-                "SendCondition(QString, QString, int, int)",
-                self.screen_no,
-                condition_name,
-                int(condition_index),
-                int(market),
-            )
+            self._control.SendCondition(self.screen_no, condition_name, int(condition_index), int(market))
         except Exception as exc:  # pragma: no cover - GUI/runtime dependent
-            logger.exception("SendCondition failed: %s", exc)
+            logger.exception("[OpenAPI] SendCondition 실패: %s", exc)
             return []
         return self.get_last_universe()
 
     def get_last_universe(self) -> List[str]:
         return list(self.last_universe)
-
-    def _on_receive_tr_condition(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: int) -> None:
-        logger.info(
-            "ReceiveTrCondition screen=%s condition=%s index=%s next=%s", screen_no, condition_name, index, next_
-        )
-        self.last_universe = [code for code in code_list.split(";") if code]
 
 
 __all__ = ["KiwoomOpenAPI"]

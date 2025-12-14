@@ -66,6 +66,7 @@ class KiwoomOpenAPI:
         self.last_universe: List[str] = []
         self.screen_no: str = "9000"
         self._control: Optional[object] = None
+        self._init_error: Optional[Exception] = None
 
         if not (DispatchWithEvents and sys.platform.startswith("win")):
             logger.info("[OpenAPI] win32com unavailable or non-Windows platform; disabling")
@@ -79,7 +80,11 @@ class KiwoomOpenAPI:
         back without raising.
         """
 
-        if self._control is not None or not (DispatchWithEvents and sys.platform.startswith("win")):
+        if self._control is not None:
+            return
+        if not (DispatchWithEvents and sys.platform.startswith("win")):
+            print("[OpenAPI] DispatchWithEvents 사용 불가 또는 비윈도우 환경")
+            self._init_error = RuntimeError("DispatchWithEvents unavailable")
             return
         try:
             print("[OpenAPI] Trying DispatchWithEvents('KHOPENAPI.KHOpenAPICtrl.1', KiwoomEventHandler)")
@@ -94,6 +99,7 @@ class KiwoomOpenAPI:
             self._control = control
             self.available = True
             self._enabled = True
+            self._init_error = None
             print("[OpenAPI] KHOpenAPI control created and events bound successfully.")
             logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
         except Exception as exc:  # pragma: no cover - Windows runtime dependent
@@ -104,6 +110,16 @@ class KiwoomOpenAPI:
             self.available = False
             self._enabled = False
             self._control = None
+            self._init_error = exc
+
+    def debug_status(self) -> str:
+        """Return a human-readable status string for debugging."""
+
+        return (
+            f"enabled={self._enabled}, control={'OK' if self._control is not None else 'None'}, "
+            f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, "
+            f"init_error={repr(self._init_error)}"
+        )
 
     def is_enabled(self) -> bool:
         """Return True when the COM control was created successfully."""
@@ -116,6 +132,7 @@ class KiwoomOpenAPI:
 
         if not self.available or not self.is_enabled():
             logger.warning("[OpenAPI] 컨트롤이 비활성 상태입니다. 로그인 불가")
+            print(f"[OpenAPI] login skipped; status={self.debug_status()}")
             return
         try:
             print("[OpenAPI] Calling CommConnect() for condition login")
@@ -130,6 +147,7 @@ class KiwoomOpenAPI:
 
         if not self.is_enabled():
             print("[OpenAPI] connect_for_conditions called but control is disabled")
+            print(f"[OpenAPI] debug_status: {self.debug_status()}")
             logger.warning("[OpenAPI] connect_for_conditions: control disabled")
             return
         self.login()

@@ -153,6 +153,12 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self._connect_signals()
+        if getattr(self.kiwoom_client, "openapi", None):
+            print(
+                "[GUI] KiwoomOpenAPI initial status:",
+                self.kiwoom_client.openapi.debug_status(),
+                flush=True,
+            )
         self._refresh_condition_list()
         self._refresh_account()
         self._refresh_positions()
@@ -355,8 +361,13 @@ class MainWindow(QMainWindow):
             if not openapi:
                 self._log("[조건] OpenAPI 래퍼가 없습니다. (초기화 실패)")
                 return
+            print("[GUI] OpenAPI debug_status before init:", openapi.debug_status(), flush=True)
             openapi.initialize_control()
+            print("[GUI] OpenAPI debug_status after init:", openapi.debug_status(), flush=True)
             if not openapi.is_enabled():
+                self._log(
+                    "[조건] OpenAPI 비활성 상태: " f"{openapi.debug_status()}"
+                )
                 self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
                 return
             self._log("[조건] CommConnect 호출 시도")
@@ -531,7 +542,10 @@ class MainWindow(QMainWindow):
             return
         if not openapi.is_enabled():
             self.condition_combo.addItem("(조건식 기능 비활성)")
-            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
+            self._log(
+                "조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)"
+            )
+            print("[GUI] OpenAPI debug_status during refresh:", openapi.debug_status(), flush=True)
             return
         if not openapi.connected:
             self.condition_combo.addItem("(로그인 필요)")

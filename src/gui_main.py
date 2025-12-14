@@ -345,9 +345,21 @@ class MainWindow(QMainWindow):
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
-            self.openapi_widget.login_result.connect(self._on_openapi_login_result)
+            # 일부 환경에서는 QAx에서 노출되는 시그널 시그니처 추론이 느슨해질 수 있으므로
+            # int 시그널을 명시적으로 선택해 연결하고, 실패 시 일반 connect로 폴백한다.
+            try:
+                self.openapi_widget.login_result[int].connect(self._on_openapi_login_result)
+            except Exception:
+                self.openapi_widget.login_result.connect(self._on_openapi_login_result)
         if self.openapi_widget and hasattr(self.openapi_widget, "condition_ver_received"):
-            self.openapi_widget.condition_ver_received.connect(self._on_openapi_condition_ver)
+            try:
+                self.openapi_widget.condition_ver_received[int, str].connect(
+                    self._on_openapi_condition_ver
+                )
+            except Exception:
+                self.openapi_widget.condition_ver_received.connect(
+                    self._on_openapi_condition_ver
+                )
 
     # Event handlers -----------------------------------------------------
     def on_mode_changed(self) -> None:

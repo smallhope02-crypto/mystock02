@@ -12,9 +12,12 @@ def test_real_balance_dummy_returns_int():
 
 def test_list_conditions_returns_dummy_items():
     client = KiwoomClient(account_no="12345678")
-    conditions = client.list_conditions()
-    assert conditions
-    assert all(isinstance(name, str) for name in conditions)
+    tuples = client.get_condition_list()
+    assert tuples
+    assert all(isinstance(item, tuple) and len(item) == 2 for item in tuples)
+    names = client.list_conditions()
+    assert names
+    assert all(isinstance(name, str) for name in names)
 
 
 def test_condition_universe_dummy_falls_back():

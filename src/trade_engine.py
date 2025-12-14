@@ -113,4 +113,4 @@ class TradeEngine:
         return self.paper_broker.get_account_summary()
 
     def condition_list(self):
-        return self.kiwoom_client.list_conditions()
+        return self.kiwoom_client.get_condition_list()

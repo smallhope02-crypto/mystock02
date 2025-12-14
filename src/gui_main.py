@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
             broker_mode="paper",
             kiwoom_client=self.kiwoom_client,
         )
+        self.condition_map = {}
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -178,7 +179,9 @@ class MainWindow(QMainWindow):
         radio_layout.addWidget(self.real_radio)
 
         self.config_btn = QPushButton("연동 설정")
+        self.openapi_login_button = QPushButton("조건식 로그인")
         radio_layout.addWidget(self.config_btn)
+        radio_layout.addWidget(self.openapi_login_button)
 
         conn_layout.addLayout(radio_layout)
 
@@ -321,6 +324,7 @@ class MainWindow(QMainWindow):
         self.auto_start_btn.clicked.connect(self.on_auto_start)
         self.auto_stop_btn.clicked.connect(self.on_auto_stop)
         self.config_btn.clicked.connect(self.on_open_config)
+        self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
 
@@ -344,9 +348,23 @@ class MainWindow(QMainWindow):
             self.engine.update_credentials(self.current_config)
             self._update_connection_labels()
 
+    def _on_openapi_login(self) -> None:
+        try:
+            self.kiwoom_client.openapi_login_and_load_conditions()
+            if self.kiwoom_client.use_openapi:
+                self._log("OpenAPI 조건식 로그인 및 로딩 완료")
+                self._refresh_condition_list()
+            else:
+                self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 비활성)")
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            self._log(f"조건식 로그인 실패: {exc}")
+
     def _selected_condition(self) -> str:
         combo_value = self.condition_combo.currentText().strip()
         if combo_value:
+            if ":" in combo_value:
+                _, name = combo_value.split(":", 1)
+                return name.strip()
             return combo_value
         manual = self.manual_condition.text().strip()
         if manual:
@@ -490,6 +508,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_condition_list(self) -> None:
         self.condition_combo.clear()
+        self.condition_map.clear()
         try:
             conditions = self.engine.condition_list()
         except Exception as exc:  # pragma: no cover - UI fallback
@@ -497,7 +516,10 @@ class MainWindow(QMainWindow):
             conditions = []
 
         if conditions:
-            self.condition_combo.addItems(conditions)
+            for idx, name in conditions:
+                label = f"{idx}: {name}"
+                self.condition_combo.addItem(label)
+                self.condition_map[label] = (idx, name)
         else:
             self._log("조건식을 불러오지 못했습니다. (OpenAPI 미사용 또는 오류)")
 

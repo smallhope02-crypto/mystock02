@@ -36,6 +36,7 @@ class KiwoomClient:
         self.app_secret = app_secret
         self._connected_paper = False
         self._connected_real = False
+        self._demo_balance = 1_000_000
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.
@@ -81,21 +82,61 @@ class KiwoomClient:
 
         return {"cash": 0.0}
 
-    def get_balance_real(self) -> Dict[str, float]:
-        """Return placeholder real-account balance.
+    def get_real_balance(self) -> int:
+        """Return the cash balance for the configured real account.
+
+        The actual Kiwoom REST/OpenAPI call should be implemented in
+        :meth:`_fetch_balance_from_kiwoom_api`. This wrapper keeps exception
+        handling in one place so GUI code can display a safe default instead
+        of crashing.
+        """
+
+        try:
+            return self._fetch_balance_from_kiwoom_api()
+        except Exception as exc:  # pragma: no cover - defensive against API errors
+            logger.exception("Failed to fetch real balance: %s", exc)
+            return 0
+
+    def _fetch_balance_from_kiwoom_api(self) -> int:
+        """Placeholder for the real Kiwoom balance API call.
 
         TODO: 실제 API 연동 시 구현
+        - 키움 REST/OpenAPI의 계좌 잔고 조회 엔드포인트를 호출
+        - 응답 JSON/XML에서 예수금(현금성 잔고) 값을 파싱해 원 단위 정수로 반환
+        - 필요 파라미터 예시: app_key, app_secret, account_no, access_token 등
         """
 
-        return {"cash": 1_000_000}
+        # 더미 구현: 실제 호출 대신 고정 잔고를 반환합니다.
+        return int(self._demo_balance)
+
+    def get_balance_real(self) -> Dict[str, float]:
+        """Legacy helper returning a dict-shaped real balance.
+
+        GUI와 엔진 코드 호환성을 위해 남겨 두며, 내부적으로는
+        :meth:`get_real_balance` 값을 감싸서 반환합니다.
+        """
+
+        return {"cash": float(self.get_real_balance())}
+
+    def list_conditions(self) -> List[str]:
+        """Return condition names stored in Kiwoom (dummy for now).
+
+        실제 연동 시에는 키움 OpenAPI(+ 또는 REST)의 "조건식 목록 조회" API를
+        호출해 조건식 이름 리스트를 파싱한 뒤 반환해야 합니다.
+
+        TODO: 실제 API 연동 시 구현
+        - 필요 파라미터 예시: app_key, app_secret, account_no, access_token 등
+        - 응답 데이터에서 조건식 이름 배열을 추출해 리스트로 변환
+        """
+
+        # 더미 구현: 실제 API가 붙기 전까지는 하드코딩된 목록을 반환합니다.
+        dummy_conditions = ["단기급등_체크", "돌파_추세", "장중급락_반등"]
+        return dummy_conditions
 
     def get_condition_list(self) -> List[str]:
-        """Return a dummy condition list.
+        """Deprecated alias kept for backward compatibility."""
 
-        TODO: 실제 API 연동 시 구현 (키움 조건식 조회 API 호출)
-        """
-
-        return ["단기급등_체크", "테스트_조건1", "수급_모니터", "뉴스_키워드"]
+        return self.list_conditions()
 
     def send_buy_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
         logger.info("[REAL MODE] Would send buy order: %s x%d at %.2f", symbol, quantity, price)

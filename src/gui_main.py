@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         conn_layout.addLayout(status_layout)
 
         balance_layout = QHBoxLayout()
-        self.paper_balance_label = QLabel("모의 잔고: -")
+        self.paper_balance_label = QLabel("모의 잔고(활성): -")
         self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
         self.real_balance_label.setStyleSheet("color: gray;")
         self.real_balance_refresh = QPushButton("잔고 새로고침")
@@ -345,10 +345,13 @@ class MainWindow(QMainWindow):
             self._update_connection_labels()
 
     def _selected_condition(self) -> str:
+        combo_value = self.condition_combo.currentText().strip()
+        if combo_value:
+            return combo_value
         manual = self.manual_condition.text().strip()
         if manual:
             return manual
-        return self.condition_combo.currentText() or ""
+        return ""
 
     def on_apply_strategy(self) -> None:
         params = dict(
@@ -445,20 +448,35 @@ class MainWindow(QMainWindow):
                 pnl_pct = (equity - self.strategy.initial_cash) / self.strategy.initial_cash * 100
 
             self.paper_balance_label.setText(
-                f"모의 잔고: {cash:,.0f} / 평가금액: {equity:,.0f} / 손익: {pnl:,.0f} ({pnl_pct:.2f}%)"
+                f"모의 잔고(활성): {cash:,.0f} / 평가금액: {equity:,.0f} / 손익: {pnl:,.0f} ({pnl_pct:.2f}%)"
             )
             self.real_balance_label.setText("실계좌 예수금: 실거래 모드에서만 표시")
             self.real_balance_label.setStyleSheet("color: gray;")
         else:
-            balance = self.kiwoom_client.get_balance_real()
-            self.real_balance_label.setStyleSheet("color: black;")
-            self.real_balance_label.setText(f"실계좌 예수금: {balance.get('cash', 0):,.0f}")
+            try:
+                balance = self.kiwoom_client.get_real_balance()
+                self.real_balance_label.setStyleSheet("color: black;")
+                self.real_balance_label.setText(f"실계좌 예수금(활성): {balance:,.0f}원")
+            except Exception as exc:  # pragma: no cover - UI fallback
+                self.real_balance_label.setStyleSheet("color: black;")
+                self.real_balance_label.setText("실계좌 예수금: 조회 실패")
+                self._log(f"실계좌 예수금 조회 실패: {exc}")
+
             self.paper_balance_label.setText("모의 잔고: 모의 모드에서만 갱신")
         self._update_connection_labels()
 
     def _refresh_real_balance(self) -> None:
-        balance = self.kiwoom_client.get_balance_real()
-        self.real_balance_label.setText(f"실계좌 예수금: {balance.get('cash', 0):,.0f}")
+        if self.engine.broker_mode == "paper":
+            self._refresh_account()
+            self._log("모의 잔고를 새로고침했습니다.")
+            return
+
+        try:
+            balance = self.kiwoom_client.get_real_balance()
+            self.real_balance_label.setText(f"실계좌 예수금(활성): {balance:,.0f}원")
+        except Exception as exc:  # pragma: no cover - UI fallback
+            self.real_balance_label.setText("실계좌 예수금: 조회 실패")
+            self._log(f"실계좌 예수금 조회 실패: {exc}")
 
     def _refresh_positions(self) -> None:
         positions = list(self.strategy.positions.values())
@@ -472,8 +490,16 @@ class MainWindow(QMainWindow):
 
     def _refresh_condition_list(self) -> None:
         self.condition_combo.clear()
-        conditions = self.engine.condition_list()
-        self.condition_combo.addItems(conditions)
+        try:
+            conditions = self.engine.condition_list()
+        except Exception as exc:  # pragma: no cover - UI fallback
+            self._log(f"조건식 목록 조회 실패: {exc}")
+            conditions = []
+
+        if conditions:
+            self.condition_combo.addItems(conditions)
+        else:
+            self._log("조건식을 불러오지 못했습니다.")
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

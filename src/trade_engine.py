@@ -104,7 +104,7 @@ class TradeEngine:
 
     def _current_cash(self) -> float:
         if self.broker_mode == "real":
-            return float(self.kiwoom_client.get_balance_real().get("cash", 0.0))
+            return float(self.kiwoom_client.get_real_balance())
         return float(self.paper_broker.cash)
 
     def account_summary(self):
@@ -113,4 +113,4 @@ class TradeEngine:
         return self.paper_broker.get_account_summary()
 
     def condition_list(self):
-        return self.kiwoom_client.get_condition_list()
+        return self.kiwoom_client.list_conditions()

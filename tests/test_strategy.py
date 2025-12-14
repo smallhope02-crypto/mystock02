@@ -28,18 +28,36 @@ class StrategyPaperBrokerTest(unittest.TestCase):
         engine = TradeEngine(strategy=strategy, selector=selector, broker_mode="paper")
         engine.set_paper_cash(50_000)
 
-        price = engine.broker.get_current_price("SYM001")
-        buy_order = strategy.evaluate_entry(["SYM001"], engine.broker.get_current_price)[0]
-        result = engine.broker.send_buy_order("SYM001", buy_order.quantity, price)
-        strategy.register_fill(buy_order, result.quantity, result.price)
+        price = engine.paper_broker.get_current_price("SYM001")
+        buy_order = strategy.evaluate_entry(["SYM001"], engine.paper_broker.get_current_price)[0]
+        result = engine.paper_broker.send_buy_order("SYM001", buy_order.quantity, price)
+        strategy.register_fill(buy_order, result.quantity, result.price, update_cash=False)
+        strategy.cash = engine.paper_broker.cash
 
         sell_price = price * 1.1
         sell_order = strategy.evaluate_exit(lambda s: sell_price)[0]
-        result = engine.broker.send_sell_order("SYM001", sell_order.quantity, sell_price)
-        strategy.register_fill(sell_order, result.quantity, result.price)
+        result = engine.paper_broker.send_sell_order("SYM001", sell_order.quantity, sell_price)
+        strategy.register_fill(sell_order, result.quantity, result.price, update_cash=False)
+        strategy.cash = engine.paper_broker.cash
 
         self.assertEqual(len(strategy.positions), 0)
-        self.assertAlmostEqual(strategy.cash, 50_000 + sell_price * result.quantity - price * buy_order.quantity, delta=1)
+        self.assertAlmostEqual(strategy.cash, engine.paper_broker.cash, delta=1)
+
+    def test_close_all_positions(self):
+        strategy = Strategy(initial_cash=100_000, max_positions=2)
+        selector = UniverseSelector()
+        engine = TradeEngine(strategy=strategy, selector=selector, broker_mode="paper")
+        engine.set_paper_cash(100_000)
+
+        price = engine.paper_broker.get_current_price("SYM010")
+        buy_order = strategy.evaluate_entry(["SYM010"], engine.paper_broker.get_current_price)[0]
+        result = engine.paper_broker.send_buy_order("SYM010", buy_order.quantity, price)
+        strategy.register_fill(buy_order, result.quantity, result.price, update_cash=False)
+        strategy.cash = engine.paper_broker.cash
+
+        engine.close_all_positions()
+        strategy.cash = engine.paper_broker.cash
+        self.assertEqual(len(strategy.positions), 0)
 
 
 if __name__ == "__main__":

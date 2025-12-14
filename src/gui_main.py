@@ -372,9 +372,15 @@ class MainWindow(QMainWindow):
                 self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
                 return
             self._log("[조건] CommConnect 호출 시도")
-            openapi.connect_for_conditions()
+            ok = openapi.connect_for_conditions()
+            if not ok:
+                self._log(f"[조건] CommConnect 호출 실패: {repr(getattr(openapi, '_init_error', None))}")
+                self._log("조건식 기능을 사용할 수 없습니다. (CommConnect 호출 실패 – 콘솔 로그와 init_error를 확인하세요.)")
+                return
             if not openapi.is_openapi_connected():
-                self._log("[조건] OpenAPI 로그인 완료 여부는 이벤트 수신 후 결정됩니다. 콘솔 로그를 확인하세요.")
+                self._log(
+                    "[조건] OpenAPI 로그인 완료 여부는 이벤트 수신 후 결정됩니다. 콘솔 로그를 확인하세요."
+                )
             if openapi.connected:
                 self._log("[조건] OpenAPI 로그인 완료 - 조건식 로딩 시도")
                 self._refresh_condition_list()

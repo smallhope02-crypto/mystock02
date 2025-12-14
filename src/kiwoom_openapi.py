@@ -12,6 +12,11 @@ import sys
 import traceback
 from typing import List, Optional, Tuple
 
+try:  # pragma: no cover - platform dependent
+    import pywintypes
+except Exception:  # pragma: no cover - fallback when pywin32 is absent
+    pywintypes = None
+
 try:  # pragma: no cover - platform specific
     from win32com.client import Dispatch, DispatchWithEvents, WithEvents
     _DISPATCH_IMPORT_ERROR: Optional[ImportError] = None
@@ -177,22 +182,36 @@ class KiwoomOpenAPI:
         return bool(self._enabled and self._control is not None)
 
     # -- Connection -----------------------------------------------------
-    def login(self) -> None:
-        """Show the OpenAPI login dialog (CommConnect)."""
+    def login(self) -> bool:
+        """Show the OpenAPI login dialog (CommConnect) with guarded errors."""
 
-        if not self.available or not self.is_enabled():
+        status_before = self.debug_status()
+        print(f"[OpenAPI] Calling CommConnect() for condition login, status(before)={status_before}")
+
+        if not self.available or not self.is_enabled() or self._control is None:
             logger.warning("[OpenAPI] 컨트롤이 비활성 상태입니다. 로그인 불가")
             print(f"[OpenAPI] login skipped; status={self.debug_status()}")
-            return
+            self._init_error = RuntimeError("OpenAPI control not available for CommConnect")
+            return False
         try:
-            print("[OpenAPI] Calling CommConnect() for condition login")
+            print("[OpenAPI] CommConnect() 호출")
             self._control.CommConnect()
             logger.info("[OpenAPI] 로그인 시도")
+            self._init_error = None
+            print("[OpenAPI] CommConnect() 호출 완료(이벤트 대기)")
+            return True
         except Exception as exc:  # pragma: no cover - runtime dependent
-            logger.exception("[OpenAPI] CommConnect 호출 실패: %s", exc)
+            # Preserve pywintypes.com_error or other exceptions for diagnostics
+            self._init_error = exc
             self.connected = False
+            if pywintypes and isinstance(exc, pywintypes.com_error):
+                print(f"[OpenAPI] CommConnect pywintypes.com_error: {repr(exc)}")
+            else:
+                print(f"[OpenAPI] CommConnect 예외 발생: {repr(exc)}")
+            logger.exception("[OpenAPI] CommConnect 호출 실패: %s", exc)
+            return False
 
-    def connect_for_conditions(self) -> None:
+    def connect_for_conditions(self) -> bool:
         """Explicit helper for condition login path used by the GUI."""
 
         if not self.is_enabled():
@@ -202,8 +221,8 @@ class KiwoomOpenAPI:
             self.initialize_control()
             print("[OpenAPI] debug_status after reinit:", self.debug_status())
             if not self.is_enabled():
-                return
-        self.login()
+                return False
+        return self.login()
 
     def is_openapi_connected(self) -> bool:
         """Return True when OpenAPI login succeeded."""

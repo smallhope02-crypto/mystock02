@@ -145,4 +145,4 @@ class Strategy:
         equity = self.cash + sum(
             position.quantity * position.entry_price for position in self.positions.values()
         )
-        return {"cash": self.cash, "equity": equity, "positions": len(self.positions)}ㅍ
+        return {"cash": self.cash, "equity": equity, "positions": len(self.positions)}

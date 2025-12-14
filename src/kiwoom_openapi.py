@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - platform dependent
-    from PyQt5.QtCore import pyqtSignal
+    from PyQt5 import QtCore
     from PyQt5.QAxContainer import QAxWidget
 
     QAX_AVAILABLE = True
@@ -106,10 +106,10 @@ else:
         ``connect() failed`` errors in the GUI.
         """
 
-        login_result = pyqtSignal(int)
-        condition_ver_received = pyqtSignal(int, str)
-        tr_condition_received = pyqtSignal(str, str, str, int, str)
-        real_condition_received = pyqtSignal(str, str, str, str)
+        login_result = QtCore.pyqtSignal(int)
+        condition_ver_received = QtCore.pyqtSignal(int, str)
+        tr_condition_received = QtCore.pyqtSignal(str, str, str, int, str)
+        real_condition_received = QtCore.pyqtSignal(str, str, str, str)
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -157,18 +157,17 @@ else:
             """Connect Kiwoom ActiveX events to Python handlers."""
 
             bindings = {
-                "OnEventConnect": self._on_event_connect,
-                "OnReceiveConditionVer": self._on_receive_condition_ver,
-                "OnReceiveTrCondition": self._on_receive_tr_condition,
-                "OnReceiveRealCondition": self._on_receive_real_condition,
+                "OnEventConnect(int)": self._on_event_connect,
+                "OnReceiveConditionVer(int, QString)": self._on_receive_condition_ver,
+                "OnReceiveTrCondition(QString, QString, QString, int, QString)": self._on_receive_tr_condition,
+                "OnReceiveRealCondition(QString, QString, QString, QString)": self._on_receive_real_condition,
             }
-            for name, handler in bindings.items():
+            for signature, handler in bindings.items():
                 try:
-                    signal = getattr(self, name)
-                    signal.connect(handler)
-                    print(f"[OpenAPI] bound {name}")
+                    QtCore.QObject.connect(self, QtCore.SIGNAL(signature), handler)
+                    print(f"[OpenAPI] bound {signature}")
                 except Exception as exc:  # pragma: no cover - depends on runtime
-                    print(f"[OpenAPI] Failed to bind {name}: {exc}")
+                    print(f"[OpenAPI] Failed to bind {signature}: {exc}")
                     traceback.print_exc()
                     self.enabled = False
                     self.available = False

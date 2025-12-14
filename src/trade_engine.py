@@ -1,5 +1,4 @@
 +"""Trade engine coordinating selector, strategy, and broker layers."""
-+from __future__ import annotations
 +
 +import logging
 +from typing import List

@@ -9,6 +9,7 @@ without crashing.
 
 import logging
 import sys
+import traceback
 from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - platform specific
@@ -30,6 +31,16 @@ class _KiwoomEventHandler:
     """
 
     _owner: Optional["KiwoomOpenAPI"] = None
+
+    def __init__(self):
+        # ``DispatchWithEvents`` expects a zero-arg initializer. Owner is injected
+        # after creation to avoid metaclass conflicts with PyQt/QObject.
+        self._owner = None
+
+    def set_owner(self, owner: "KiwoomOpenAPI") -> None:
+        """Attach the outer wrapper after COM object creation."""
+
+        self._owner = owner
 
     def OnEventConnect(self, err_code):  # pragma: no cover - runtime callback
         if self._owner:
@@ -74,7 +85,10 @@ class KiwoomOpenAPI:
         try:
             control = DispatchWithEvents("KHOPENAPI.KHOpenAPICtrl.1", _KiwoomEventHandler)
             try:
-                control._owner = self  # type: ignore[attr-defined]
+                # ``DispatchWithEvents`` returns an instance of a dynamically
+                # generated class. We inject the owner via helper to keep the
+                # event handler free of PyQt metaclasses.
+                control.set_owner(self)  # type: ignore[attr-defined]
             except Exception:
                 logger.warning("[OpenAPI] 이벤트 핸들러에 owner 연결 실패")
             self._control = control
@@ -82,6 +96,9 @@ class KiwoomOpenAPI:
             self._enabled = True
             logger.info("[OpenAPI] KHOpenAPI 컨트롤 생성 완료")
         except Exception as exc:  # pragma: no cover - Windows runtime dependent
+            # 디버깅을 위해 콘솔에 전체 Traceback 을 출력한다.
+            print("[OpenAPI] 컨트롤 생성 실패:", repr(exc))
+            traceback.print_exc()
             logger.exception("[OpenAPI] 컨트롤 생성 실패: %s", exc)
             self.available = False
             self._enabled = False
@@ -175,6 +192,7 @@ class KiwoomOpenAPI:
     def _handle_event_connect(self, err_code: int) -> None:
         self.connected = err_code == 0
         self.available = self.available and self._enabled
+        print(f"[OpenAPI] OnEventConnect err_code={err_code} enabled={self._enabled}")
         if self.connected:
             logger.info("[OpenAPI] 로그인 성공 (err_code=%s)", err_code)
             self.load_conditions()
@@ -184,9 +202,11 @@ class KiwoomOpenAPI:
 
     def _handle_condition_ver(self, lRet: int, sMsg: str) -> None:
         logger.info("[OpenAPI] 조건식 버전 수신: ret=%s msg=%s", lRet, sMsg)
+        print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
         if lRet == 1:
             self.fetch_condition_list()
             logger.info("[OpenAPI] 조건식 %d개 로딩 완료", len(self.conditions))
+            print(f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료")
         else:
             self.conditions_loaded = False
             logger.warning("[OpenAPI] 조건식 버전 수신 실패")
@@ -200,6 +220,9 @@ class KiwoomOpenAPI:
             condition_name,
             index,
             next_,
+        )
+        print(
+            f"[OpenAPI] OnReceiveTrCondition screen={screen_no} condition={condition_name} index={index} next={next_} codes={code_list}"
         )
         self.last_universe = [code for code in str(code_list).split(";") if code]
 

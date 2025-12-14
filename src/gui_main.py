@@ -350,12 +350,19 @@ class MainWindow(QMainWindow):
 
     def _on_openapi_login(self) -> None:
         try:
-            self._log("[조건] 로그인 시도 중...")
+            self._log("[조건] 로그인 버튼 클릭 - 컨트롤 초기화 확인")
+            self._log("[조건] CommConnect 호출 시도")
             self.kiwoom_client.openapi_login_and_load_conditions()
             openapi = self.kiwoom_client.openapi
-            if openapi and openapi.available:
+            if not openapi:
+                self._log("[조건] OpenAPI 래퍼가 없습니다. (초기화 실패)")
+                return
+            if not getattr(openapi, "_enabled", False):
+                self._log("[조건] OpenAPI 래퍼가 비활성 상태입니다. 컨트롤 생성 실패 여부를 콘솔에서 확인하세요.")
+                return
+            if openapi.available:
                 if openapi.connected:
-                    self._log("OpenAPI 조건식 로그인 및 로딩 완료")
+                    self._log("[조건] OpenAPI 로그인 완료 - 조건식 로딩 시도")
                     self._refresh_condition_list()
                 else:
                     self._log("OpenAPI 로그인 후 다시 시도해 주세요.")

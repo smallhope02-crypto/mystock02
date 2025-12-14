@@ -1,22 +1,21 @@
-+"""Convenience launcher for the Mystock02 GUI.
-+
-+Run this file directly (``python run_gui.py``) if running the module form
-+(``python -m src.gui_main``) does not work because of PYTHONPATH issues on the
-+current environment. The script prepends the repository root to ``sys.path``
-+so that the ``src`` package is importable when the project is unpacked from a
-+zip archive.
-+"""
-+
-+import sys
-+from pathlib import Path
-+
-+# Ensure the repository root (where ``src`` lives) is importable.
-+ROOT = Path(__file__).resolve().parent
-+if str(ROOT) not in sys.path:
-+    sys.path.insert(0, str(ROOT))
-+
-+from src.gui_main import main
-+
-+
-+if __name__ == "__main__":
-+    main()
+"""Configuration helpers for API keys and default settings."""
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class AppConfig:
+    """Simple container for Kiwoom API credentials and account numbers."""
+
+    app_key: str
+    app_secret: str
+    account_no: str
+
+    @classmethod
+    def from_env(cls) -> "AppConfig":
+        """Load configuration from environment variables with sensible defaults."""
+        return cls(
+            app_key=os.getenv("KIWOOM_APP_KEY", "demo_app_key"),
+            app_secret=os.getenv("KIWOOM_APP_SECRET", "demo_app_secret"),
+            account_no=os.getenv("KIWOOM_ACCOUNT_NO", "00000000"),
+        )

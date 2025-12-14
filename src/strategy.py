@@ -1,5 +1,4 @@
 +"""Trading strategy primitives with budget-aware entry and exit logic."""
-+from __future__ import annotations
 +
 +import logging
 +from dataclasses import dataclass, field

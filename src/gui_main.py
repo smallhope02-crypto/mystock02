@@ -6,7 +6,7 @@ import sys
 from typing import List, Optional
 
 try:
-    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtCore import Qt, QTimer, pyqtSlot
     from PyQt5.QtWidgets import (
         QApplication,
         QButtonGroup,
@@ -398,6 +398,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self._log(f"조건식 로그인 실패: {exc}")
 
+    @pyqtSlot(int)
     def _on_openapi_login_result(self, err_code: int) -> None:
         if err_code == 0:
             self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
@@ -405,6 +406,7 @@ class MainWindow(QMainWindow):
         else:
             self._log(f"[조건] OpenAPI 로그인 실패 (코드 {err_code})")
 
+    @pyqtSlot(int, str)
     def _on_openapi_condition_ver(self, ret: int, msg: str) -> None:
         self._log(f"[조건] 조건식 버전 수신 ret={ret} msg={msg}")
 

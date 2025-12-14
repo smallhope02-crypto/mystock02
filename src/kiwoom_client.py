@@ -39,12 +39,18 @@ class KiwoomClient:
         self._connected_paper = False
         self._connected_real = False
         self._demo_balance = 1_000_000
-        try:
-            self.openapi = KiwoomOpenAPI()
-        except Exception as exc:  # pragma: no cover - defensive guard for GUI layer
-            logger.exception("KiwoomOpenAPI init failed: %s", exc)
-            self.openapi = None
+        self.openapi: KiwoomOpenAPI | None = None
         self.use_openapi = False
+
+    def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
+        """Attach a GUI-hosted QAx Kiwoom control.
+
+        The QAx control must be created after ``QApplication`` exists, so the GUI
+        constructs it and injects it here rather than letting this client create
+        it at import time.
+        """
+
+        self.openapi = openapi
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.

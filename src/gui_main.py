@@ -40,6 +40,7 @@ if sys.version_info < (3, 8):  # pragma: no cover - defensive guard for old inst
 
 from .config import AppConfig, load_config
 from .kiwoom_client import KiwoomClient
+from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
 from .selector import UniverseSelector
 from .strategy import Strategy
 from .trade_engine import TradeEngine
@@ -132,6 +133,15 @@ class MainWindow(QMainWindow):
             app_key=self.current_config.app_key,
             app_secret=self.current_config.app_secret,
         )
+        self.openapi_widget: Optional[KiwoomOpenAPI] = None
+        if QAX_AVAILABLE:
+            try:
+                self.openapi_widget = KiwoomOpenAPI(self)
+                self.kiwoom_client.attach_openapi(self.openapi_widget)
+            except Exception as exc:  # pragma: no cover - GUI/runtime dependent
+                print(f"[GUI] OpenAPI 위젯 생성 실패: {exc}")
+        else:
+            print("[GUI] QAxContainer 가 없어 OpenAPI 위젯을 생성하지 않습니다.")
         self.selector = UniverseSelector(kiwoom_client=self.kiwoom_client)
         self.engine = TradeEngine(
             strategy=self.strategy,
@@ -334,6 +344,10 @@ class MainWindow(QMainWindow):
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
+        if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
+            self.openapi_widget.login_result.connect(self._on_openapi_login_result)
+        if self.openapi_widget and hasattr(self.openapi_widget, "condition_ver_received"):
+            self.openapi_widget.condition_ver_received.connect(self._on_openapi_condition_ver)
 
     # Event handlers -----------------------------------------------------
     def on_mode_changed(self) -> None:
@@ -374,18 +388,25 @@ class MainWindow(QMainWindow):
             self._log("[조건] CommConnect 호출 시도")
             ok = openapi.connect_for_conditions()
             if not ok:
-                self._log(f"[조건] CommConnect 호출 실패: {repr(getattr(openapi, '_init_error', None))}")
+                err = getattr(openapi, "_init_error", None)
+                self._log(f"[조건] CommConnect 호출 실패: {repr(err)}")
                 self._log("조건식 기능을 사용할 수 없습니다. (CommConnect 호출 실패 – 콘솔 로그와 init_error를 확인하세요.)")
                 return
-            if not openapi.is_openapi_connected():
-                self._log(
-                    "[조건] OpenAPI 로그인 완료 여부는 이벤트 수신 후 결정됩니다. 콘솔 로그를 확인하세요."
-                )
-            if openapi.connected:
-                self._log("[조건] OpenAPI 로그인 완료 - 조건식 로딩 시도")
-                self._refresh_condition_list()
+            self._log(
+                "[조건] CommConnect 호출 완료. 로그인 완료 여부는 OnEventConnect 이벤트 수신 후 결정됩니다."
+            )
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self._log(f"조건식 로그인 실패: {exc}")
+
+    def _on_openapi_login_result(self, err_code: int) -> None:
+        if err_code == 0:
+            self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
+            self._refresh_condition_list()
+        else:
+            self._log(f"[조건] OpenAPI 로그인 실패 (코드 {err_code})")
+
+    def _on_openapi_condition_ver(self, ret: int, msg: str) -> None:
+        self._log(f"[조건] 조건식 버전 수신 ret={ret} msg={msg}")
 
     def _selected_condition(self) -> str:
         combo_value = self.condition_combo.currentText().strip()

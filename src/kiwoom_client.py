@@ -52,3 +52,4 @@
 +        TODO: 실제 API 연동 시 구현
 +        """
 +        return {"cash": 0.0, "equity": 0.0, "pnl": 0.0}
+

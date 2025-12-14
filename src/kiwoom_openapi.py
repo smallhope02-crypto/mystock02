@@ -155,24 +155,22 @@ else:
 
         def _bind_signals(self) -> None:
             """Connect Kiwoom ActiveX events to Python handlers."""
-
             bindings = {
                 "OnEventConnect(int)": self._on_event_connect,
                 "OnReceiveConditionVer(int, QString)": self._on_receive_condition_ver,
                 "OnReceiveTrCondition(QString, QString, QString, int, QString)": self._on_receive_tr_condition,
                 "OnReceiveRealCondition(QString, QString, QString, QString)": self._on_receive_real_condition,
             }
+
             for signature, handler in bindings.items():
                 try:
-                    QtCore.QObject.connect(self, QtCore.SIGNAL(signature), handler)
+                    # PyQt5 old-style connection that still works for QAxWidget COM events.
+                    self.connect(self, QtCore.SIGNAL(signature), handler)
                     print(f"[OpenAPI] bound {signature}")
                 except Exception as exc:  # pragma: no cover - depends on runtime
-                    print(f"[OpenAPI] Failed to bind {signature}: {exc}")
+                    # Do not crash on binding failures; log and continue so the GUI can surface status.
+                    print(f"[OpenAPI] Failed to bind {signature}: {exc!r}")
                     traceback.print_exc()
-                    self.enabled = False
-                    self.available = False
-                    self.init_error = exc
-                    self._init_error = exc
 
         def initialize_control(self) -> None:
             """Re-run control setup if it was previously disabled."""

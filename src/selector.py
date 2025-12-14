@@ -1,5 +1,4 @@
 +"""Universe selection logic with pluggable scoring hooks."""
-+from __future__ import annotations
 +
 +import logging
 +import random

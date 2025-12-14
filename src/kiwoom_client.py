@@ -3,7 +3,6 @@
 +This module keeps the function signatures that will later be wired to the
 +real Kiwoom REST API. For now every call only logs what would happen.
 +"""
-+from __future__ import annotations
 +
 +import logging
 +from dataclasses import dataclass
@@ -52,4 +51,3 @@
 +        TODO: 실제 API 연동 시 구현
 +        """
 +        return {"cash": 0.0, "equity": 0.0, "pnl": 0.0}
-

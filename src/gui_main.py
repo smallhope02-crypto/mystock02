@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
             kiwoom_client=self.kiwoom_client,
         )
         self.condition_map = {}
+        self.condition_universe: set[str] = set()
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -229,10 +230,12 @@ class MainWindow(QMainWindow):
         self.manual_condition = QLineEdit()
         self.manual_condition.setPlaceholderText("직접 입력 (선택 사항)")
         self.refresh_conditions_btn = QPushButton("조건 새로고침")
+        self.run_condition_btn = QPushButton("조건 실행(실시간 포함)")
         cond_layout.addWidget(QLabel("조건식"))
         cond_layout.addWidget(self.condition_combo)
         cond_layout.addWidget(self.manual_condition)
         cond_layout.addWidget(self.refresh_conditions_btn)
+        cond_layout.addWidget(self.run_condition_btn)
         cond_group.setLayout(cond_layout)
         main.addWidget(cond_group)
 
@@ -343,6 +346,7 @@ class MainWindow(QMainWindow):
         self.config_btn.clicked.connect(self.on_open_config)
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
+        self.run_condition_btn.clicked.connect(self._execute_condition)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
             try:
@@ -355,6 +359,10 @@ class MainWindow(QMainWindow):
             self.openapi_widget.condition_ver_received.connect(
                 self._on_openapi_condition_ver
             )
+        if self.openapi_widget and hasattr(self.openapi_widget, "tr_condition_received"):
+            self.openapi_widget.tr_condition_received.connect(self._on_tr_condition_received)
+        if self.openapi_widget and hasattr(self.openapi_widget, "real_condition_received"):
+            self.openapi_widget.real_condition_received.connect(self._on_real_condition_received)
 
     # Event handlers -----------------------------------------------------
     def on_mode_changed(self) -> None:
@@ -417,6 +425,29 @@ class MainWindow(QMainWindow):
     def _on_openapi_condition_ver(self, ret: int, msg: str) -> None:
         self._log(f"[조건] 조건식 버전 수신 ret={ret} msg={msg}")
 
+    @pyqtSlot(str, str, str, int, str)
+    def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
+        codes = [code for code in str(code_list).split(";") if code]
+        self.condition_universe = set(codes)
+        preview = ", ".join(codes[:10]) + (" ..." if len(codes) > 10 else "")
+        self._log(
+            f"[조건] 초기 조회 결과 수신({condition_name}/{index}) - {len(codes)}건: {preview}"
+        )
+
+    @pyqtSlot(str, str, str, str)
+    def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
+        if event == "I":
+            self.condition_universe.add(code)
+            action = "편입"
+        elif event == "D":
+            self.condition_universe.discard(code)
+            action = "편출"
+        else:
+            action = f"기타({event})"
+        self._log(
+            f"[조건] 실시간 {action} 이벤트 - {code} (조건 {condition_name}/{condition_index}), 총 {len(self.condition_universe)}건"
+        )
+
     def _selected_condition(self) -> str:
         combo_value = self.condition_combo.currentText().strip()
         if combo_value:
@@ -431,6 +462,51 @@ class MainWindow(QMainWindow):
         if manual:
             return manual
         return ""
+
+    def _selected_condition_tuple(self) -> Optional[tuple[int, str]]:
+        """Return (index, name) of the currently selected condition if available."""
+
+        combo_value = self.condition_combo.currentText().strip()
+        if combo_value and combo_value in self.condition_map:
+            return self.condition_map[combo_value]
+        if combo_value and ":" in combo_value:
+            idx_str, name = combo_value.split(":", 1)
+            try:
+                return int(idx_str.strip()), name.strip()
+            except ValueError:
+                return None
+        manual = self.manual_condition.text().strip()
+        if manual:
+            return None
+        return None
+
+    def _execute_condition(self) -> None:
+        """Run the selected condition via OpenAPI (조회 + 실시간 등록)."""
+
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if not openapi or not openapi.is_enabled():
+            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
+            return
+        if not openapi.connected:
+            self._log("OpenAPI 로그인 후 조건식을 사용할 수 있습니다.")
+            return
+        if not openapi.conditions_loaded:
+            self._log("조건식 정보가 아직 로드되지 않았습니다. 새로고침을 먼저 진행하세요.")
+            openapi.load_conditions()
+            return
+
+        selected = self._selected_condition_tuple()
+        if not selected:
+            self._log("실행할 조건식을 선택하거나 입력해 주세요.")
+            return
+
+        idx, name = selected
+        self.condition_universe.clear()
+        self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
+        try:
+            openapi.send_condition(openapi.screen_no, name, idx, 1)
+        except Exception as exc:  # pragma: no cover - runtime dependent
+            self._log(f"조건 실행 실패: {exc}")
 
     def on_apply_strategy(self) -> None:
         params = dict(

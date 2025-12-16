@@ -164,9 +164,20 @@ else:
 
             for signature, handler in bindings.items():
                 try:
-                    # PyQt5 old-style connection that still works for QAxWidget COM events.
+                    # Prefer new-style access when available (e.g., self.OnEventConnect).
+                    event_obj = getattr(self, signature.split("(")[0], None)
+                    if event_obj and hasattr(event_obj, "connect"):
+                        event_obj.connect(handler)
+                        print(f"[OpenAPI] bound {signature} via direct attribute")
+                        continue
+                except Exception:
+                    # Fall back to the legacy SIGNAL macro wiring below.
+                    traceback.print_exc()
+
+                try:
+                    # PyQt5 still accepts the legacy SIGNAL macro for QAxWidget COM events.
                     self.connect(self, QtCore.SIGNAL(signature), handler)
-                    print(f"[OpenAPI] bound {signature}")
+                    print(f"[OpenAPI] bound {signature} via SIGNAL macro")
                 except Exception as exc:  # pragma: no cover - depends on runtime
                     # Do not crash on binding failures; log and continue so the GUI can surface status.
                     print(f"[OpenAPI] Failed to bind {signature}: {exc!r}")
@@ -291,7 +302,9 @@ else:
             return [(int(idx), name) for idx, name in self.get_conditions()]
 
         # -- Condition universe -----------------------------------------
-        def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int) -> None:
+        def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int = 1) -> None:
+            """Run a condition by index/name and optionally register real-time (search_type=1)."""
+
             if not self.conditions_loaded:
                 print("[OpenAPI] 조건식이 로딩되지 않았습니다.")
                 return
@@ -307,11 +320,11 @@ else:
                 print(f"[OpenAPI] SendCondition 실패: {exc}")
                 traceback.print_exc()
 
-        def request_condition_universe(self, condition_index: int, condition_name: str, market: str = "0") -> List[str]:
+        def request_condition_universe(self, condition_index: int, condition_name: str, search_type: int = 0) -> List[str]:
             if not self.conditions_loaded:
                 print("[OpenAPI] 조건식 조회 불가 (조건 로딩 필요)")
                 return []
-            self.send_condition(self.screen_no, condition_name, condition_index, int(market))
+            self.send_condition(self.screen_no, condition_name, condition_index, int(search_type))
             return self.get_last_universe()
 
         def get_last_universe(self) -> List[str]:

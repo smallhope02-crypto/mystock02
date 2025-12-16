@@ -10,6 +10,7 @@ non-Windows platforms), a disabled stub keeps imports/tests from crashing.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import traceback
 from typing import List, Optional, Tuple
@@ -17,7 +18,7 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - platform dependent
-    from PyQt5 import QtCore
+    from PyQt5 import QtCore, QtWidgets
     from PyQt5.QAxContainer import QAxWidget
 
     QAX_AVAILABLE = True
@@ -111,8 +112,11 @@ else:
         tr_condition_received = QtCore.pyqtSignal(str, str, str, int, str)
         real_condition_received = QtCore.pyqtSignal(str, str, str, str)
 
-        def __init__(self, parent=None):
+        def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
+            self._widget_parent: Optional[QtWidgets.QWidget] = (
+                qwidget_parent if isinstance(qwidget_parent, QtWidgets.QWidget) else None
+            )
             self.enabled = False
             self.available = False
             self.connected = False
@@ -129,8 +133,10 @@ else:
         # -- Setup ------------------------------------------------------
         def _wire_control(self) -> None:
             print("[OpenAPI] initialize_control invoked", flush=True)
+            print(f"[OpenAPI] module_path={__file__}", flush=True)
+            print(f"[OpenAPI] cwd={os.getcwd()}", flush=True)
             print(
-                f"[OpenAPI] runtime Python={sys.version.split()[0]} PyQt5={QtCore.PYQT_VERSION_STR}",
+                f"[OpenAPI] runtime Python={sys.version.split()[0]} PyQt5={QtCore.PYQT_VERSION_STR} exe={sys.executable}",
                 flush=True,
             )
             if not sys.platform.startswith("win"):
@@ -138,7 +144,10 @@ else:
                 print("[OpenAPI] Non-Windows platform; QAx disabled")
                 return
             try:
-                self.ax = QAxWidget(parent=self)
+                if self._widget_parent:
+                    self.ax = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1", parent=self._widget_parent)
+                else:
+                    self.ax = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
                 self.ax.setControl("KHOPENAPI.KHOpenAPICtrl.1")
                 self._control = self.ax  # legacy compatibility for tests/clients
                 self.enabled = True

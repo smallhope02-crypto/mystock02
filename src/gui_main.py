@@ -353,17 +353,14 @@ class MainWindow(QMainWindow):
                 f"[DEBUG] login_result signal object: {self.openapi_widget.login_result!r}"
             )
             try:
-                self.openapi_widget.login_result.connect(
-                    self._on_openapi_login_result
+                self.openapi_widget.login_result.connect(self._on_openapi_login_result)
+                self._log(
+                    "[DEBUG] login_result 시그널을 _on_openapi_login_result 슬롯에 연결했습니다."
                 )
-            except TypeError:
-                # 일부 환경에서 타입 추론 문제로 직접 연결이 실패할 수 있어 래퍼를 사용
-                self.openapi_widget.login_result.connect(
-                    lambda err: self._on_openapi_login_result(int(err))
+            except Exception as exc:
+                self._log(
+                    f"[ERROR] login_result 연결 실패: {exc}; 시그니처를 확인하세요."
                 )
-            self._log(
-                "[DEBUG] login_result 시그널을 _on_openapi_login_result 슬롯에 연결했습니다."
-            )
         if self.openapi_widget and hasattr(self.openapi_widget, "condition_ver_received"):
             self.openapi_widget.condition_ver_received.connect(
                 self._on_openapi_condition_ver

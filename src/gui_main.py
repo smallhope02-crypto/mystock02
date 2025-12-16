@@ -728,15 +728,18 @@ class MainWindow(QMainWindow):
 
     def _refresh_condition_list(self) -> None:
         previous = self.condition_combo.currentText()
-        self.condition_combo.clear()
-        self.condition_map.clear()
+        existing_count = self.condition_combo.count()
         openapi = getattr(self.kiwoom_client, "openapi", None)
 
         if not openapi:
+            self.condition_combo.clear()
+            self.condition_map.clear()
             self.condition_combo.addItem("(조건식 기능 비활성)")
             self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 래퍼 미생성)")
             return
         if not openapi.is_enabled():
+            self.condition_combo.clear()
+            self.condition_map.clear()
             self.condition_combo.addItem("(조건식 기능 비활성)")
             self._log(
                 "조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)"
@@ -744,10 +747,14 @@ class MainWindow(QMainWindow):
             print("[GUI] OpenAPI debug_status during refresh:", openapi.debug_status(), flush=True)
             return
         if not openapi.connected:
+            self.condition_combo.clear()
+            self.condition_map.clear()
             self.condition_combo.addItem("(로그인 필요)")
             self._log("OpenAPI 로그인 후 조건식을 사용할 수 있습니다.")
             return
         if not openapi.conditions_loaded:
+            self.condition_combo.clear()
+            self.condition_map.clear()
             self.condition_combo.addItem("(조건 로딩 중)")
             openapi.load_conditions()
             self._log("조건식 정보를 불러오는 중입니다...")
@@ -769,7 +776,19 @@ class MainWindow(QMainWindow):
         else:
             self._log(f"[조건] 로딩 결과: 총 {raw_count}개")
 
+        if existing_count and raw_count < existing_count:
+            print(
+                f"[GUI] IGNORE shorter conditions update raw_count={raw_count} existing_count={existing_count}"
+            )
+            self._log(
+                f"[조건] 조건식 개수가 줄어든 응답(raw={raw_count})은 무시하고 기존 {existing_count}개를 유지합니다."
+            )
+            return
+
         self.all_conditions = [(int(idx), name) for idx, name in conditions]
+
+        self.condition_combo.clear()
+        self.condition_map.clear()
 
         if self.all_conditions:
             labels = [f"{idx}: {name}" for idx, name in self.all_conditions]

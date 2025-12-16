@@ -128,6 +128,7 @@ else:
             self._init_error: Optional[Exception] = None
             self._control: Optional[object] = None
             self.ax: Optional[QAxWidget] = None
+            self._condition_load_requested: bool = False
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -254,23 +255,31 @@ else:
             if not (self.is_enabled() and self.connected):
                 print("[OpenAPI] 로그인 후 조건 로딩을 시도하세요")
                 return
+            if self._condition_load_requested:
+                print("[OpenAPI] skip GetConditionLoad: already requested")
+                return
             try:
                 target = self.ax
                 if target and hasattr(target, "dynamicCall"):
+                    import traceback
+
+                    print(f"[OpenAPI] self_id={id(self)} GetConditionLoad caller:\n" + "".join(traceback.format_stack(limit=12)))
                     target.dynamicCall("GetConditionLoad()")
                 else:
                     raise RuntimeError("GetConditionLoad 사용 불가")
+                self._condition_load_requested = True
                 print("[OpenAPI] 조건식 로딩 요청")
             except Exception as exc:
                 print(f"[OpenAPI] GetConditionLoad 실패: {exc}")
                 traceback.print_exc()
                 self.init_error = exc
 
-        def fetch_condition_list(self) -> None:
+        def fetch_condition_list(self, apply: bool = True) -> List[Tuple[str, str]]:
             if not (self.is_enabled() and self.connected):
-                self.conditions = []
-                self.conditions_loaded = False
-                return
+                if apply:
+                    self.conditions = []
+                    self.conditions_loaded = False
+                return []
             try:
                 target = self.ax
                 if target and hasattr(target, "dynamicCall"):
@@ -280,10 +289,11 @@ else:
             except Exception as exc:  # pragma: no cover - runtime dependent
                 print(f"[OpenAPI] GetConditionNameList 실패: {exc}")
                 traceback.print_exc()
-                self.conditions = []
-                self.conditions_loaded = False
-                self.init_error = exc
-                return
+                if apply:
+                    self.conditions = []
+                    self.conditions_loaded = False
+                    self.init_error = exc
+                return []
 
             raw_str = str(raw_list or "")
             head = raw_str[:200]
@@ -301,13 +311,15 @@ else:
                     parsed.append((idx_str, name))
                 except ValueError:
                     logger.warning("[OpenAPI] 조건식 파싱 실패: %s", block)
-            self.conditions = parsed
-            self.conditions_loaded = True
-            head_preview = ", ".join([f"{i}:{n}" for i, n in parsed[:5]])
-            tail_preview = ", ".join([f"{i}:{n}" for i, n in parsed[-5:]]) if len(parsed) > 5 else ""
-            print(
-                f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료 head=[{head_preview}] tail=[{tail_preview}]"
-            )
+            if apply:
+                self.conditions = parsed
+                self.conditions_loaded = True
+                head_preview = ", ".join([f"{i}:{n}" for i, n in parsed[:5]])
+                tail_preview = ", ".join([f"{i}:{n}" for i, n in parsed[-5:]]) if len(parsed) > 5 else ""
+                print(
+                    f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료 head=[{head_preview}] tail=[{tail_preview}]"
+                )
+            return parsed
 
         def get_conditions(self) -> List[Tuple[str, str]]:
             if not self.conditions_loaded:
@@ -363,7 +375,25 @@ else:
         def _on_receive_condition_ver(self, lRet: int, sMsg: str) -> None:
             print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
             if lRet == 1:
-                self.fetch_condition_list()
+                previous_len = len(self.conditions)
+                parsed = self.fetch_condition_list(apply=False)
+                new_len = len(parsed)
+                if previous_len > 0 and new_len < previous_len:
+                    raw_str = "".join(traceback.format_stack(limit=4))
+                    print(
+                        f"[OpenAPI] IGNORE shorter condition list: new_len={new_len} old_len={previous_len}"
+                    )
+                    print(raw_str)
+                    self._condition_load_requested = False
+                    return
+                self.conditions = parsed
+                self.conditions_loaded = True
+                head_preview = ", ".join([f"{i}:{n}" for i, n in parsed[:5]])
+                tail_preview = ", ".join([f"{i}:{n}" for i, n in parsed[-5:]]) if len(parsed) > 5 else ""
+                print(
+                    f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료 head=[{head_preview}] tail=[{tail_preview}]"
+                )
+                self._condition_load_requested = False
             self.condition_ver_received.emit(int(lRet), str(sMsg))
 
         def _on_receive_tr_condition(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:

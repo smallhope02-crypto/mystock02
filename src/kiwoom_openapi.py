@@ -155,32 +155,24 @@ else:
 
         def _bind_signals(self) -> None:
             """Connect Kiwoom ActiveX events to Python handlers."""
+
             bindings = {
-                "OnEventConnect(int)": self._on_event_connect,
-                "OnReceiveConditionVer(int, QString)": self._on_receive_condition_ver,
-                "OnReceiveTrCondition(QString, QString, QString, int, QString)": self._on_receive_tr_condition,
-                "OnReceiveRealCondition(QString, QString, QString, QString)": self._on_receive_real_condition,
+                "OnEventConnect": self._on_event_connect,
+                "OnReceiveConditionVer": self._on_receive_condition_ver,
+                "OnReceiveTrCondition": self._on_receive_tr_condition,
+                "OnReceiveRealCondition": self._on_receive_real_condition,
             }
 
-            for signature, handler in bindings.items():
+            for name, handler in bindings.items():
                 try:
-                    # Prefer new-style access when available (e.g., self.OnEventConnect).
-                    event_obj = getattr(self, signature.split("(")[0], None)
+                    event_obj = getattr(self, name, None)
                     if event_obj and hasattr(event_obj, "connect"):
                         event_obj.connect(handler)
-                        print(f"[OpenAPI] bound {signature} via direct attribute")
-                        continue
-                except Exception:
-                    # Fall back to the legacy SIGNAL macro wiring below.
-                    traceback.print_exc()
-
-                try:
-                    # PyQt5 still accepts the legacy SIGNAL macro for QAxWidget COM events.
-                    self.connect(self, QtCore.SIGNAL(signature), handler)
-                    print(f"[OpenAPI] bound {signature} via SIGNAL macro")
-                except Exception as exc:  # pragma: no cover - depends on runtime
-                    # Do not crash on binding failures; log and continue so the GUI can surface status.
-                    print(f"[OpenAPI] Failed to bind {signature}: {exc!r}")
+                        print(f"[OpenAPI] bound {name} via direct attribute")
+                    else:
+                        raise AttributeError(f"{name} signal not found")
+                except Exception as exc:  # pragma: no cover - runtime dependent
+                    print(f"[OpenAPI] Failed to bind {name}: {exc!r}")
                     traceback.print_exc()
 
         def initialize_control(self) -> None:

@@ -349,6 +349,9 @@ class MainWindow(QMainWindow):
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
+            self._log(
+                f"[DEBUG] login_result signal object: {self.openapi_widget.login_result!r}"
+            )
             try:
                 self.openapi_widget.login_result.connect(
                     self._on_openapi_login_result

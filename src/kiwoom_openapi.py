@@ -1,10 +1,13 @@
 """PyQt5 QAx-based Kiwoom OpenAPI wrapper.
 
-This module hosts the KHOPENAPI ActiveX control inside a ``QAxWidget`` so that
-CommConnect/조건식 로딩 can run on the Qt event loop instead of pywin32. When
-PyQt5.QAxContainer is unavailable (e.g., on non-Windows CI), a disabled stub is
-provided so imports and tests continue to work without raising.
+This module wraps the KHOPENAPI ActiveX control inside a ``QAxWidget`` that is
+owned by a ``QObject`` wrapper.  All COM events are received on the QAxWidget
+and immediately re-emitted as plain PyQt signals so that the GUI can subscribe
+without worrying about overloaded COM signatures.  When QAx is unavailable
+non-Windows platforms), a disabled stub keeps imports/tests from crashing.
 """
+
+from __future__ import annotations
 
 import logging
 import sys
@@ -22,10 +25,7 @@ try:  # pragma: no cover - platform dependent
 except Exception as exc:  # pragma: no cover - fallback on CI/non-Windows
     QAX_AVAILABLE = False
     _QAX_IMPORT_ERROR = exc
-    pyqtSignal = None  # type: ignore
-
-    class QAxWidget:  # type: ignore
-        pass
+    QtCore = None  # type: ignore
 
 
 class _DisabledOpenAPI:
@@ -42,13 +42,14 @@ class _DisabledOpenAPI:
         self.init_error = _QAX_IMPORT_ERROR
         self._init_error = _QAX_IMPORT_ERROR
         self._control = None
+        self.ax = None
         if _QAX_IMPORT_ERROR:
             print(f"[OpenAPI] QAx unavailable: {_QAX_IMPORT_ERROR}")
 
     # Compatibility helpers --------------------------------------------
     def debug_status(self) -> str:
         return (
-            f"enabled={self.enabled}, available={self.available}, control={'OK' if self._control else 'None'}, "
+            f"enabled={self.enabled}, available={self.available}, control={'OK' if self.ax else 'None'}, "
             f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, init_error={repr(self.init_error)}"
         )
 
@@ -97,13 +98,12 @@ if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore
 else:
 
-    class KiwoomOpenAPI(QAxWidget):  # pragma: no cover - GUI/runtime heavy
-        """QAx-hosted KHOpenAPI control with signal wiring and helpers.
+    class KiwoomOpenAPI(QtCore.QObject):  # pragma: no cover - GUI/runtime heavy
+        """QObject wrapper that hosts KHOPENAPI inside a hidden QAxWidget.
 
-        ``login_result`` is a plain ``pyqtSignal(int)`` that mirrors the
-        ``OnEventConnect`` callback.  It intentionally has a single signature
-        to avoid the overload-indexing (`signal[int]`) that previously caused
-        ``connect() failed`` errors in the GUI.
+        ``login_result`` is a single-signature ``pyqtSignal(int)`` that mirrors
+        the OpenAPI ``OnEventConnect`` callback to avoid the overloaded COM
+        signal signatures that previously caused connection errors in the GUI.
         """
 
         login_result = QtCore.pyqtSignal(int)
@@ -122,20 +122,25 @@ else:
             self.screen_no = "9000"
             self.init_error: Optional[Exception] = None
             self._init_error: Optional[Exception] = None
-            self._control = None
+            self._control: Optional[object] = None
+            self.ax: Optional[QAxWidget] = None
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
         def _wire_control(self) -> None:
             print("[OpenAPI] initialize_control invoked", flush=True)
+            print(
+                f"[OpenAPI] runtime Python={sys.version.split()[0]} PyQt5={QtCore.PYQT_VERSION_STR}",
+                flush=True,
+            )
             if not sys.platform.startswith("win"):
                 self.init_error = RuntimeError("Windows 환경에서만 지원됩니다")
-                self._init_error = self.init_error
                 print("[OpenAPI] Non-Windows platform; QAx disabled")
                 return
             try:
-                self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
-                self._control = self  # allow test stubs to override
+                self.ax = QAxWidget(parent=self)
+                self.ax.setControl("KHOPENAPI.KHOpenAPICtrl.1")
+                self._control = self.ax  # legacy compatibility for tests/clients
                 self.enabled = True
                 self.available = True
                 self.init_error = None
@@ -146,7 +151,7 @@ else:
                 self.available = False
                 self.init_error = exc
                 self._init_error = exc
-                self._control = None
+                self.ax = None
                 print("[OpenAPI] QAx control creation failed:", repr(exc))
                 traceback.print_exc()
                 return
@@ -155,6 +160,9 @@ else:
 
         def _bind_signals(self) -> None:
             """Connect Kiwoom ActiveX events to Python handlers."""
+
+            if not self.ax:
+                return
 
             bindings = {
                 "OnEventConnect": self._on_event_connect,
@@ -165,7 +173,7 @@ else:
 
             for name, handler in bindings.items():
                 try:
-                    event_obj = getattr(self, name, None)
+                    event_obj = getattr(self.ax, name, None)
                     if event_obj and hasattr(event_obj, "connect"):
                         event_obj.connect(handler)
                         print(f"[OpenAPI] bound {name} via direct attribute")
@@ -178,18 +186,18 @@ else:
         def initialize_control(self) -> None:
             """Re-run control setup if it was previously disabled."""
 
-            if self.enabled and self.available:
+            if self.enabled and self.available and self.ax:
                 return
             self._wire_control()
 
         def debug_status(self) -> str:
             return (
-                f"enabled={self.enabled}, available={self.available}, control={'OK' if self._control else 'None'}, "
-                f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, init_error={repr(self._init_error)}"
+                f"enabled={self.enabled}, available={self.available}, control={'OK' if self.ax else 'None'}, "
+                f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, init_error={repr(self.init_error)}"
             )
 
         def is_enabled(self) -> bool:
-            return bool(self.enabled and self._control is not None)
+            return bool(self.enabled and self.ax is not None)
 
         # -- Connection --------------------------------------------------
         def _safe_comm_connect(self, context: str = "") -> bool:
@@ -203,12 +211,10 @@ else:
                 self._init_error = self.init_error
                 return False
 
-            target = self._control or self
+            target = self._control or self.ax
             try:
-                if hasattr(target, "dynamicCall"):
+                if target and hasattr(target, "dynamicCall"):
                     target.dynamicCall("CommConnect()")
-                elif hasattr(target, "CommConnect"):
-                    target.CommConnect()
                 else:
                     raise RuntimeError("CommConnect 호출 수단이 없습니다")
                 self.init_error = None
@@ -240,8 +246,8 @@ else:
                 print("[OpenAPI] 로그인 후 조건 로딩을 시도하세요")
                 return
             try:
-                target = self._control or self
-                if hasattr(target, "dynamicCall"):
+                target = self.ax
+                if target and hasattr(target, "dynamicCall"):
                     target.dynamicCall("GetConditionLoad()")
                 else:
                     raise RuntimeError("GetConditionLoad 사용 불가")
@@ -250,7 +256,6 @@ else:
                 print(f"[OpenAPI] GetConditionLoad 실패: {exc}")
                 traceback.print_exc()
                 self.init_error = exc
-                self._init_error = exc
 
         def fetch_condition_list(self) -> None:
             if not (self.is_enabled() and self.connected):
@@ -258,8 +263,8 @@ else:
                 self.conditions_loaded = False
                 return
             try:
-                target = self._control or self
-                if hasattr(target, "dynamicCall"):
+                target = self.ax
+                if target and hasattr(target, "dynamicCall"):
                     raw_list = target.dynamicCall("GetConditionNameList()")
                 else:
                     raise RuntimeError("GetConditionNameList 사용 불가")
@@ -269,7 +274,6 @@ else:
                 self.conditions = []
                 self.conditions_loaded = False
                 self.init_error = exc
-                self._init_error = exc
                 return
 
             parsed: List[Tuple[str, str]] = []
@@ -300,9 +304,9 @@ else:
             if not self.conditions_loaded:
                 print("[OpenAPI] 조건식이 로딩되지 않았습니다.")
                 return
-            target = self._control or self
+            target = self.ax
             try:
-                if hasattr(target, "dynamicCall"):
+                if target and hasattr(target, "dynamicCall"):
                     target.dynamicCall(
                         "SendCondition(QString, QString, int, int)", screen_no, condition_name, int(index), int(search_type)
                     )
@@ -340,20 +344,20 @@ else:
             print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
             if lRet == 1:
                 self.fetch_condition_list()
-            self.condition_ver_received.emit(lRet, sMsg)
+            self.condition_ver_received.emit(int(lRet), str(sMsg))
 
         def _on_receive_tr_condition(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
             print(
                 f"[OpenAPI] OnReceiveTrCondition screen={screen_no} condition={condition_name} index={index} next={next_} codes={code_list}"
             )
             self.last_universe = [code for code in str(code_list).split(";") if code]
-            self.tr_condition_received.emit(screen_no, code_list, condition_name, index, next_)
+            self.tr_condition_received.emit(str(screen_no), str(code_list), str(condition_name), int(index), str(next_))
 
         def _on_receive_real_condition(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
             print(
                 f"[OpenAPI] OnReceiveRealCondition code={code} event={event} condition={condition_name} index={condition_index}"
             )
-            self.real_condition_received.emit(code, event, condition_name, condition_index)
+            self.real_condition_received.emit(str(code), str(event), str(condition_name), str(condition_index))
 
 
 __all__ = ["KiwoomOpenAPI", "QAX_AVAILABLE"]

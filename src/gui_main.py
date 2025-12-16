@@ -24,6 +24,7 @@ try:
         QMessageBox,
         QPushButton,
         QRadioButton,
+        QSizePolicy,
         QSpinBox,
         QTableWidget,
         QTableWidgetItem,
@@ -227,6 +228,17 @@ class MainWindow(QMainWindow):
         cond_group = QGroupBox("조건식 선택")
         cond_layout = QHBoxLayout()
         self.condition_combo = QComboBox()
+        self.condition_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.condition_combo.setMinimumWidth(600)
+        try:
+            # 넓은 드롭다운으로 긴 조건명을 확인할 수 있게 확장
+            self.condition_combo.view().setMinimumWidth(700)
+        except Exception:
+            # 일부 플랫폼에서는 view() 접근이 실패할 수 있으므로 무시
+            pass
+        self.condition_combo.currentTextChanged.connect(self._update_condition_tooltip)
+        self.condition_combo.setToolTip("")
+        self.all_conditions: list[tuple[int, str]] = []
         self.manual_condition = QLineEdit()
         self.manual_condition.setPlaceholderText("직접 입력 (선택 사항)")
         self.refresh_conditions_btn = QPushButton("조건 새로고침")
@@ -649,6 +661,14 @@ class MainWindow(QMainWindow):
             self.positions_table.setItem(row, 3, QTableWidgetItem(f"{pos.highest_price:.2f}"))
         self.positions_table.resizeColumnsToContents()
 
+    def _update_condition_tooltip(self, text: str) -> None:
+        """조건식 콤보박스 툴팁을 현재 선택된 항목으로 갱신한다."""
+
+        if not text:
+            self.condition_combo.setToolTip("")
+        else:
+            self.condition_combo.setToolTip(text)
+
     def _refresh_condition_list(self) -> None:
         previous = self.condition_combo.currentText()
         self.condition_combo.clear()
@@ -682,17 +702,37 @@ class MainWindow(QMainWindow):
             self._log(f"조건식 목록 조회 실패: {exc}")
             conditions = []
 
-        if conditions:
-            for idx, name in conditions:
+        raw_count = len(conditions)
+        preview_head = ", ".join([f"{c[0]}:{c[1]}" for c in conditions[:3]])
+        preview_tail = ", ".join([f"{c[0]}:{c[1]}" for c in conditions[-3:]]) if raw_count > 3 else ""
+        if preview_tail and preview_head != preview_tail:
+            self._log(
+                f"[조건] 로딩 결과: 총 {raw_count}개, 앞부분 [{preview_head}], 끝부분 [{preview_tail}]"
+            )
+        else:
+            self._log(f"[조건] 로딩 결과: 총 {raw_count}개")
+
+        self.all_conditions = [(int(idx), name) for idx, name in conditions]
+
+        if self.all_conditions:
+            for idx, name in self.all_conditions:
                 label = f"{idx}: {name}"
                 self.condition_combo.addItem(label)
                 self.condition_map[label] = (idx, name)
             if previous in self.condition_map:
                 self.condition_combo.setCurrentText(previous)
-            self._log(f"조건식 목록 {len(conditions)}개 로딩 완료")
+            combo_count = self.condition_combo.count()
+            if combo_count != raw_count:
+                self._log(
+                    f"[조건][경고] 콤보 항목 수({combo_count})와 로딩 수({raw_count}) 불일치"
+                )
+            else:
+                self._log(f"조건식 목록 {combo_count}개 로딩 완료")
         else:
             self.condition_combo.addItem("(조건 없음)")
             self._log("계정에 등록된 조건식이 없습니다. (0150에서 확인해 주세요)")
+
+        self._update_condition_tooltip(self.condition_combo.currentText())
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

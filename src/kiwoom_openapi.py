@@ -285,6 +285,13 @@ else:
                 self.init_error = exc
                 return
 
+            raw_str = str(raw_list or "")
+            head = raw_str[:200]
+            tail = raw_str[-200:] if len(raw_str) > 200 else ""
+            print(
+                f"[OpenAPI] GetConditionNameList raw_len={len(raw_str)} head='{head}' tail='{tail}'"
+            )
+
             parsed: List[Tuple[str, str]] = []
             for block in str(raw_list).split(";"):
                 if not block:
@@ -296,7 +303,11 @@ else:
                     logger.warning("[OpenAPI] 조건식 파싱 실패: %s", block)
             self.conditions = parsed
             self.conditions_loaded = True
-            print(f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료")
+            head_preview = ", ".join([f"{i}:{n}" for i, n in parsed[:5]])
+            tail_preview = ", ".join([f"{i}:{n}" for i, n in parsed[-5:]]) if len(parsed) > 5 else ""
+            print(
+                f"[OpenAPI] 조건식 {len(self.conditions)}개 로딩 완료 head=[{head_preview}] tail=[{tail_preview}]"
+            )
 
         def get_conditions(self) -> List[Tuple[str, str]]:
             if not self.conditions_loaded:

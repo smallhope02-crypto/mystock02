@@ -49,6 +49,60 @@ from .trade_engine import TradeEngine
 logger = logging.getLogger(__name__)
 
 
+def _debug_combo_population(combo: QComboBox, src_items: List[str], label: str = "conditions") -> None:
+    """Debug helper to log combo population counts and detect maxCount truncation."""
+
+    try:
+        normalized: List[str] = []
+        for item in src_items or []:
+            if isinstance(item, str):
+                normalized.append(item)
+            elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                normalized.append(f"{item[0]}: {item[1]}")
+            elif isinstance(item, dict) and ("index" in item and "name" in item):
+                normalized.append(f"{item['index']}: {item['name']}")
+            else:
+                normalized.append(str(item))
+
+        src_len = len(normalized)
+        max_count = combo.maxCount() if hasattr(combo, "maxCount") else None
+        before_count = combo.count()
+        print(
+            f"[DEBUG] {label}: populate start src_len={src_len}, combo.maxCount={max_count}, before_count={before_count}, combo.objectName={combo.objectName()!r}"
+        )
+
+        if src_len:
+            print(f"[DEBUG] {label}: SRC first='{normalized[0]}' | last='{normalized[-1]}'")
+
+        combo.clear()
+        combo.addItems(normalized)
+
+        after_count = combo.count()
+        print(f"[DEBUG] {label}: after addItems combo.count={after_count}, combo.maxCount={max_count}")
+
+        if after_count:
+            gui_first = combo.itemText(0)
+            gui_last = combo.itemText(after_count - 1)
+            print(f"[DEBUG] {label}: GUI first='{gui_first}' | last='{gui_last}'")
+
+        if src_len and max_count and src_len > max_count and after_count == max_count:
+            expected_first = normalized[-max_count]
+            expected_last = normalized[-1]
+            slice_match = (combo.itemText(0) == expected_first) and (combo.itemText(after_count - 1) == expected_last)
+            print(f"[DEBUG] {label}: EXPECT slice[-{max_count}:] first='{expected_first}' | last='{expected_last}'")
+            print(f"[DEBUG] {label}: slice_match={slice_match}")
+            if slice_match:
+                print(
+                    f"[DEBUG] {label}: ✅ CONFIRMED: combo.maxCount({max_count}) 때문에 앞쪽 아이템이 삭제되어 '맨 끝 {max_count}개만' 남았습니다."
+                )
+            else:
+                print(
+                    f"[DEBUG] {label}: ⚠️ after_count==maxCount인데 slice_match가 False입니다. 다른 로직(슬라이싱/필터/정렬)도 의심하세요."
+                )
+    except Exception as exc:  # pragma: no cover - defensive debug helper
+        print(f"[DEBUG] {label}: _debug_combo_population error: {exc!r}")
+
+
 class ConfigDialog(QDialog):
     """Dialog to edit Kiwoom credentials and run connection checks."""
 
@@ -230,6 +284,9 @@ class MainWindow(QMainWindow):
         self.condition_combo = QComboBox()
         self.condition_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.condition_combo.setMinimumWidth(600)
+        print(
+            f"[DEBUG] condition_combo initial maxCount={self.condition_combo.maxCount()} count={self.condition_combo.count()}"
+        )
         try:
             # 넓은 드롭다운으로 긴 조건명을 확인할 수 있게 확장
             self.condition_combo.view().setMinimumWidth(700)
@@ -715,9 +772,10 @@ class MainWindow(QMainWindow):
         self.all_conditions = [(int(idx), name) for idx, name in conditions]
 
         if self.all_conditions:
+            labels = [f"{idx}: {name}" for idx, name in self.all_conditions]
+            _debug_combo_population(self.condition_combo, labels, label="condition_combo")
             for idx, name in self.all_conditions:
                 label = f"{idx}: {name}"
-                self.condition_combo.addItem(label)
                 self.condition_map[label] = (idx, name)
             if previous in self.condition_map:
                 self.condition_combo.setCurrentText(previous)

@@ -493,6 +493,10 @@ class MainWindow(QMainWindow):
             self.openapi_widget.balance_received.connect(self._on_balance_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "holdings_received"):
             self.openapi_widget.holdings_received.connect(self._on_holdings_received)
+        if self.openapi_widget and hasattr(self.openapi_widget, "server_gubun_changed"):
+            self.openapi_widget.server_gubun_changed.connect(self._on_server_gubun_changed)
+        if self.openapi_widget and hasattr(self.openapi_widget, "holdings_received"):
+            self.openapi_widget.holdings_received.connect(self._on_holdings_received)
 
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
@@ -591,9 +595,11 @@ class MainWindow(QMainWindow):
         self.engine.set_paper_cash(self.paper_cash_input.value())
 
     def _update_server_label(self, gubun: str) -> None:
-        text = "서버: -"
-        if gubun:
-            text = "서버: 모의" if gubun == "1" else "서버: 실서버"
+        text = f"서버: 알 수 없음(raw={gubun})"
+        if gubun == "1":
+            text = f"서버: 모의(raw={gubun})"
+        elif gubun:
+            text = f"서버: 실서버(raw={gubun})"
         self.server_label.setText(text)
 
     # Event handlers -----------------------------------------------------
@@ -653,7 +659,8 @@ class MainWindow(QMainWindow):
             self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
             if self.openapi_widget:
                 self.openapi_widget.request_account_list()
-                self._update_server_label(self.openapi_widget.get_server_gubun())
+                raw = self.openapi_widget.get_server_gubun_raw()
+                self._update_server_label(raw)
             self._refresh_condition_list()
         else:
             self._log(f"[조건] OpenAPI 로그인 실패 (코드 {err_code})")
@@ -707,7 +714,7 @@ class MainWindow(QMainWindow):
         self._save_current_settings()
         # 서버 구분 표시
         if self.openapi_widget:
-            self._update_server_label(self.openapi_widget.get_server_gubun())
+            self._update_server_label(self.openapi_widget.get_server_gubun_raw())
 
     @pyqtSlot(int, int)
     def _on_balance_received(self, cash: int, orderable: int) -> None:
@@ -720,6 +727,13 @@ class MainWindow(QMainWindow):
         self.real_holdings = holdings
         self._log(f"[실거래] 보유종목 수신: {len(holdings)}건")
         self._refresh_positions(market_open=self._is_market_open())
+
+    @pyqtSlot(str)
+    def _on_server_gubun_changed(self, raw: str) -> None:
+        self._update_server_label(raw)
+        decision = "SIMULATION" if raw == "1" else "REAL_OR_UNKNOWN"
+        self._log(f"[DEBUG] GetServerGubun raw={raw!r}")
+        self._log(f"[DEBUG] server_decision={decision} ui_mode={'REAL' if self.real_radio.isChecked() else 'SIM'}")
 
     def _on_account_selected(self, account: str) -> None:
         self._save_current_settings()
@@ -952,10 +966,13 @@ class MainWindow(QMainWindow):
             return
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
-            gubun = openapi.get_server_gubun()
+            gubun = openapi.get_server_gubun_raw()
             self._update_server_label(gubun)
             if gubun == "1":
-                self._log("[경고] 현재 OpenAPI가 모의서버로 연결되어 있어 실계좌 조회/주문이 불가합니다.")
+                self._log(
+                    "[경고] 현재 OpenAPI가 모의서버로 연결(raw='1')되어 실계좌 조회/주문 불가. "
+                    "실서버로 다시 로그인하세요 (로그아웃 후 로그인창에서 모의투자 체크 해제)."
+                )
                 return
         if openapi and hasattr(openapi, "request_deposit_and_holdings") and openapi.connected:
             pw = self.account_pw_input.text().strip()

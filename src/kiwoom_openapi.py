@@ -127,6 +127,7 @@ else:
         accounts_received = QtCore.pyqtSignal(list)
         balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
         holdings_received = QtCore.pyqtSignal(list)  # list of dicts
+        server_gubun_changed = QtCore.pyqtSignal(str)
 
         def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
@@ -222,7 +223,8 @@ else:
         def debug_status(self) -> str:
             return (
                 f"enabled={self.enabled}, available={self.available}, control={'OK' if self.ax else 'None'}, "
-                f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, init_error={repr(self.init_error)}"
+                f"connected={self.connected}, conditions_loaded={self.conditions_loaded}, "
+                f"init_error={repr(self.init_error)}, server_gubun={self.server_gubun!r}"
             )
 
         def is_enabled(self) -> bool:
@@ -389,6 +391,8 @@ else:
             print(f"[OpenAPI] OnEventConnect err_code={ec} enabled={self.enabled}")
             self.login_result.emit(ec)
             if self.connected:
+                raw = self.get_server_gubun_raw()
+                self.server_gubun_changed.emit(raw)
                 self.load_conditions()
                 self.request_account_list()
 
@@ -440,10 +444,12 @@ else:
                     raw_accounts = str(ax.dynamicCall("GetLoginInfo(QString)", "ACCNO") or "")
                     gubun = str(ax.dynamicCall("GetLoginInfo(QString)", "GetServerGubun") or "")
                     self.server_gubun = gubun
+                    print(f"[DEBUG] GetServerGubun raw={gubun!r} (request_account_list)")
                 accounts = [acc for acc in raw_accounts.split(";") if acc]
                 self.accounts = accounts
                 print(f"[OpenAPI] 계좌 목록 {len(accounts)}건 로딩 완료: {accounts[:3]}")
                 self.accounts_received.emit(accounts)
+                self.server_gubun_changed.emit(self.server_gubun)
             except Exception as exc:  # pragma: no cover - runtime dependent
                 print(f"[OpenAPI] 계좌 목록 조회 실패: {exc}")
                 traceback.print_exc()
@@ -462,6 +468,17 @@ else:
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] GetServerGubun 실패: {exc}")
             return self.server_gubun
+
+        def get_server_gubun_raw(self) -> str:
+            raw = self.get_server_gubun()
+            print(f"[DEBUG] GetServerGubun raw={raw!r}")
+            return raw
+
+        def is_simulation_server(self) -> bool:
+            raw = self.get_server_gubun_raw()
+            decision = raw == "1"
+            print(f"[DEBUG] server_decision={'SIMULATION' if decision else 'REAL_OR_UNKNOWN'} raw={raw!r}")
+            return decision
 
         def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
             """Request deposit (opw00001) and holdings (opw00018)."""

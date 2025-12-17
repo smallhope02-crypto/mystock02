@@ -29,14 +29,36 @@ class UniverseSelector:
         ]
         # KiwoomClient is injected lazily to avoid circular imports
         self.kiwoom_client = kiwoom_client
+        self.external_universe: List[str] = []
 
     def attach_client(self, client: object) -> None:
         """Attach a KiwoomClient-like object after construction."""
 
         self.kiwoom_client = client
 
+    def set_external_universe(self, universe: List[str]) -> None:
+        """Override the selector with an externally provided universe."""
+
+        self.external_universe = list(dict.fromkeys(universe))
+        logger.info("[유니버스] external_universe set: %d개", len(self.external_universe))
+
+    def add_to_universe(self, symbol: str) -> None:
+        if symbol not in self.external_universe:
+            self.external_universe.append(symbol)
+            logger.info("[유니버스] external_universe update: +%s (size=%d)", symbol, len(self.external_universe))
+
+    def remove_from_universe(self, symbol: str) -> None:
+        before = len(self.external_universe)
+        self.external_universe = [s for s in self.external_universe if s != symbol]
+        if len(self.external_universe) != before:
+            logger.info("[유니버스] external_universe update: -%s (size=%d)", symbol, len(self.external_universe))
+
     def select(self, condition_name: str) -> List[str]:
         """Return a sorted universe of symbols for the given condition."""
+        if self.external_universe:
+            logger.info("[유니버스] selector 사용 목록: external_universe 우선 적용 (%d개)", len(self.external_universe))
+            return list(self.external_universe)
+
         base_universe = self._load_base_universe(condition_name)
         composite_score: Dict[str, float] = {symbol: 0.0 for symbol in base_universe}
 

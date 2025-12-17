@@ -206,6 +206,11 @@ class MainWindow(QMainWindow):
         )
         self.condition_map = {}
         self.condition_universe: set[str] = set()
+        self.enforce_market_hours: bool = True
+        self.market_start = datetime.time(9, 0)
+        self.market_end = datetime.time(15, 20)
+        self._name_cache: dict[str, str] = {}
+        self._last_price_refresh_reason: str = ""
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -385,8 +390,8 @@ class MainWindow(QMainWindow):
         main.addWidget(param_group)
 
         # Positions and log
-        self.positions_table = QTableWidget(0, 4)
-        self.positions_table.setHorizontalHeaderLabels(["종목", "수량", "진입가", "최고가"])
+        self.positions_table = QTableWidget(0, 6)
+        self.positions_table.setHorizontalHeaderLabels(["종목코드", "종목명", "수량", "진입가", "최고가", "현재가/등락"])
         main.addWidget(self.positions_table)
 
         self.log_view = QTextEdit()
@@ -508,15 +513,21 @@ class MainWindow(QMainWindow):
         self._log(
             f"[조건] 초기 조회 결과 수신({condition_name}/{index}) - {len(codes)}건: {preview}"
         )
+        self.engine.set_external_universe(list(self.condition_universe))
+        self._log(f"[유니버스] external_universe set: {len(self.condition_universe)}개")
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
         if event == "I":
             self.condition_universe.add(code)
+            self.engine.add_universe_symbol(code)
             action = "편입"
+            self._log(f"[유니버스] external_universe update: +{code} (size={len(self.condition_universe)})")
         elif event == "D":
             self.condition_universe.discard(code)
+            self.engine.remove_universe_symbol(code)
             action = "편출"
+            self._log(f"[유니버스] external_universe update: -{code} (size={len(self.condition_universe)})")
         else:
             action = f"기타({event})"
         self._log(
@@ -577,6 +588,7 @@ class MainWindow(QMainWindow):
 
         idx, name = selected
         self.condition_universe.clear()
+        self.engine.set_external_universe([])
         self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
         try:
             openapi.send_condition(openapi.screen_no, name, idx, 1)
@@ -611,14 +623,34 @@ class MainWindow(QMainWindow):
             if proceed != QMessageBox.Yes:
                 return
 
+        if self.enforce_market_hours and not self._is_market_open():
+            now = datetime.datetime.now()
+            self._log(
+                f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
+            )
+            return
+
+        if not self.condition_universe:
+            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            return
+
+        self.engine.set_external_universe(list(self.condition_universe))
+        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
         condition = self._selected_condition() or "default"
         self.engine.run_once(condition)
         self._refresh_account()
-        self._refresh_positions()
+        self._refresh_positions(market_open=self._is_market_open())
         self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
 
     def on_auto_start(self) -> None:
         if not self.auto_timer.isActive():
+            self._log(f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode}")
+            if self.enforce_market_hours and not self._is_market_open():
+                now = datetime.datetime.now()
+                self._log(
+                    f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
+                )
+                return
             self.auto_timer.start()
             self.status_label.setText("상태: 자동 매매 중 (매수 시작됨)")
             self._log("자동 매매 시작")
@@ -633,10 +665,27 @@ class MainWindow(QMainWindow):
         self._on_eod_check()
         if self.eod_executed_today == datetime.date.today():
             return
+        now = datetime.datetime.now()
+        if self.enforce_market_hours and not self._is_market_open():
+            self._log(
+                f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
+            )
+            self._refresh_positions(market_open=False)
+            return
+        if not self.condition_universe:
+            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            self._refresh_positions(market_open=self._is_market_open())
+            return
+        self.engine.set_external_universe(list(self.condition_universe))
+        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
         condition = self._selected_condition() or "default"
         self.engine.run_once(condition)
         self._refresh_account()
-        self._refresh_positions()
+        self._refresh_positions(market_open=self._is_market_open())
+
+    def _is_market_open(self) -> bool:
+        now_time = datetime.datetime.now().time()
+        return self.market_start <= now_time <= self.market_end
 
     def _on_eod_check(self) -> None:
         if not self.eod_checkbox.isChecked():
@@ -708,14 +757,55 @@ class MainWindow(QMainWindow):
             self.real_balance_label.setText("실계좌 예수금: 조회 실패")
             self._log(f"실계좌 예수금 조회 실패: {exc}")
 
-    def _refresh_positions(self) -> None:
+    def _get_symbol_name(self, code: str) -> str:
+        if code in self._name_cache:
+            return self._name_cache[code]
+        try:
+            name = self.kiwoom_client.get_master_name(code)
+        except Exception as exc:  # pragma: no cover - GUI fallback
+            self._log(f"[시세] 종목명 조회 실패({code}): {exc}")
+            name = f"UNKNOWN-{code}"
+        self._name_cache[code] = name
+        return name
+
+    def _refresh_positions(self, market_open: Optional[bool] = None) -> None:
+        if market_open is None:
+            market_open = self._is_market_open()
+
         positions = list(self.strategy.positions.values())
         self.positions_table.setRowCount(len(positions))
+        price_refresh_reason = ""
+
         for row, pos in enumerate(positions):
+            name = self._get_symbol_name(pos.symbol)
+            current_price = None
+            change_text = "--"
+            if not market_open:
+                price_refresh_reason = "[시세] 장전이라 시세 갱신을 건너뜁니다."
+            else:
+                try:
+                    current_price = self.engine.get_current_price(pos.symbol)
+                    if current_price and pos.entry_price:
+                        change_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+                        change_text = f"{current_price:.2f} / {change_pct:.2f}%"
+                    elif current_price:
+                        change_text = f"{current_price:.2f}"
+                except Exception as exc:  # pragma: no cover - defensive
+                    price_refresh_reason = f"[시세] 실시간 시세 조회 실패({pos.symbol}): {exc}"
+
             self.positions_table.setItem(row, 0, QTableWidgetItem(pos.symbol))
-            self.positions_table.setItem(row, 1, QTableWidgetItem(str(pos.quantity)))
-            self.positions_table.setItem(row, 2, QTableWidgetItem(f"{pos.entry_price:.2f}"))
-            self.positions_table.setItem(row, 3, QTableWidgetItem(f"{pos.highest_price:.2f}"))
+            self.positions_table.setItem(row, 1, QTableWidgetItem(name))
+            self.positions_table.setItem(row, 2, QTableWidgetItem(str(pos.quantity)))
+            self.positions_table.setItem(row, 3, QTableWidgetItem(f"{pos.entry_price:.2f}"))
+            self.positions_table.setItem(row, 4, QTableWidgetItem(f"{pos.highest_price:.2f}"))
+            self.positions_table.setItem(row, 5, QTableWidgetItem(change_text))
+
+        if price_refresh_reason and price_refresh_reason != self._last_price_refresh_reason:
+            self._log(price_refresh_reason)
+            self._last_price_refresh_reason = price_refresh_reason
+        elif market_open and not price_refresh_reason:
+            self._last_price_refresh_reason = ""
+
         self.positions_table.resizeColumnsToContents()
 
     def _update_condition_tooltip(self, text: str) -> None:

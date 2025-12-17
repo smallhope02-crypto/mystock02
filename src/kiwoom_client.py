@@ -41,6 +41,7 @@ class KiwoomClient:
         self._demo_balance = 1_000_000
         self.openapi: KiwoomOpenAPI | None = None
         self.use_openapi = False
+        self._master_name_cache: Dict[str, str] = {}
 
     def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
         """Attach a GUI-hosted QAx Kiwoom control.
@@ -224,3 +225,26 @@ class KiwoomClient:
         """
 
         return {"cash": 0.0, "equity": 0.0, "pnl": 0.0}
+
+    # -- Master data ---------------------------------------------------
+    def get_master_name(self, code: str) -> str:
+        """Return the security name for a code, with a small cache."""
+
+        if code in self._master_name_cache:
+            return self._master_name_cache[code]
+
+        name = ""
+        if self.use_openapi and self.openapi and sys.platform.startswith("win"):
+            try:
+                ax = getattr(self.openapi, "ax", None)
+                if ax and hasattr(ax, "dynamicCall"):
+                    name = str(ax.dynamicCall("GetMasterCodeName(QString)", code) or "")
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                logger.warning("GetMasterCodeName 실패(%s): %s", code, exc)
+
+        if not name:
+            # Dummy fallback for environments without live master data
+            name = f"UNKNOWN-{code}"
+
+        self._master_name_cache[code] = name
+        return name

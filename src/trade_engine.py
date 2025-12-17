@@ -28,6 +28,8 @@ class TradeEngine:
         self.broker_mode = broker_mode
         self.kiwoom_client = kiwoom_client or KiwoomClient(account_no="00000000")
         self.paper_broker = paper_broker or PaperBroker(initial_cash=self.strategy.initial_cash)
+        if hasattr(self.selector, "attach_client"):
+            self.selector.attach_client(self.kiwoom_client)
 
     def set_mode(self, mode: str) -> None:
         if mode not in {"paper", "real"}:
@@ -73,6 +75,7 @@ class TradeEngine:
     def _execute_orders(self, orders: Sequence[Order]) -> None:
         for order in orders:
             if self.broker_mode == "real":
+                logger.info("[주문] 실거래 모드 — SendOrder 호출 예정 (%s %s x%d)", order.side, order.symbol, order.quantity)
                 broker_result = (
                     self.kiwoom_client.send_buy_order(order.symbol, order.quantity, order.price)
                     if order.side == "buy"
@@ -90,6 +93,7 @@ class TradeEngine:
                 continue
 
             # paper mode
+            logger.info("[주문] 시뮬레이션/더미 모드 — 실주문 전송 없음 (%s %s x%d)", order.side, order.symbol, order.quantity)
             result = (
                 self.paper_broker.send_buy_order(order.symbol, order.quantity, order.price)
                 if order.side == "buy"
@@ -114,3 +118,20 @@ class TradeEngine:
 
     def condition_list(self):
         return self.kiwoom_client.get_condition_list()
+
+    # -- Universe plumbing ---------------------------------------------
+    def set_external_universe(self, symbols: List[str]) -> None:
+        if hasattr(self.selector, "set_external_universe"):
+            self.selector.set_external_universe(symbols)
+
+    def add_universe_symbol(self, symbol: str) -> None:
+        if hasattr(self.selector, "add_to_universe"):
+            self.selector.add_to_universe(symbol)
+
+    def remove_universe_symbol(self, symbol: str) -> None:
+        if hasattr(self.selector, "remove_from_universe"):
+            self.selector.remove_from_universe(symbol)
+
+    # -- Price lookup --------------------------------------------------
+    def get_current_price(self, symbol: str) -> float:
+        return self._active_price_lookup(symbol)

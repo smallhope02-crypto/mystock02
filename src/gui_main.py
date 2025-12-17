@@ -106,17 +106,19 @@ def _debug_combo_population(combo: QComboBox, src_items: List[str], label: str =
 class ConfigDialog(QDialog):
     """Dialog to edit Kiwoom credentials and run connection checks."""
 
-    def __init__(self, parent: QWidget, config: AppConfig, client: KiwoomClient):
+    def __init__(self, parent: QWidget, config: AppConfig, client: KiwoomClient, settings: QSettings, mode: str):
         super().__init__(parent)
         self.setWindowTitle("연동 설정")
         self.client = client
         self._config = config
+        self._settings = settings
+        self._mode = mode
         self.result_config: Optional[AppConfig] = None
 
-        self.app_key_edit = QLineEdit(config.app_key)
-        self.app_secret_edit = QLineEdit(config.app_secret)
+        self.app_key_edit = QLineEdit(self._load_value("app_key", config.app_key))
+        self.app_secret_edit = QLineEdit(self._load_value("app_secret", config.app_secret))
         self.app_secret_edit.setEchoMode(QLineEdit.Password)
-        self.account_no_edit = QLineEdit(config.account_no)
+        self.account_no_edit = QLineEdit(self._load_value("account_no", config.account_no))
 
         self.reload_btn = QPushButton("환경변수에서 다시 읽기")
         self.paper_login_btn = QPushButton("모의 로그인 테스트")
@@ -148,6 +150,7 @@ class ConfigDialog(QDialog):
         self.app_key_edit.setText(cfg.app_key)
         self.app_secret_edit.setText(cfg.app_secret)
         self.account_no_edit.setText(cfg.account_no)
+        self._save_values()
 
     def _test_paper_login(self) -> None:
         self._apply_to_client()
@@ -167,11 +170,25 @@ class ConfigDialog(QDialog):
         )
         self.client.update_credentials(cfg)
         self._config = cfg
+        self._save_values()
 
     def _on_accept(self) -> None:
         self._apply_to_client()
         self.result_config = self._config
         self.accept()
+
+    # -- Settings helpers ----------------------------------------------
+    def _key(self, name: str) -> str:
+        return f"connection/{self._mode}/{name}"
+
+    def _load_value(self, name: str, default: str) -> str:
+        return str(self._settings.value(self._key(name), default))
+
+    def _save_values(self) -> None:
+        self._settings.setValue(self._key("app_key"), self.app_key_edit.text())
+        self._settings.setValue(self._key("app_secret"), self.app_secret_edit.text())
+        self._settings.setValue(self._key("account_no"), self.account_no_edit.text())
+        self._settings.sync()
 
 
 class MainWindow(QMainWindow):
@@ -185,9 +202,9 @@ class MainWindow(QMainWindow):
         self.current_config = load_config()
         self.strategy = Strategy()
         self.kiwoom_client = KiwoomClient(
-            account_no=self.current_config.account_no,
-            app_key=self.current_config.app_key,
-            app_secret=self.current_config.app_secret,
+            account_no=self.settings.value("connection/real/account_no", self.current_config.account_no),
+            app_key=self.settings.value("connection/real/app_key", self.current_config.app_key),
+            app_secret=self.settings.value("connection/real/app_secret", self.current_config.app_secret),
         )
         self.openapi_widget: Optional[KiwoomOpenAPI] = None
         if QAX_AVAILABLE:
@@ -213,6 +230,7 @@ class MainWindow(QMainWindow):
         self._name_cache: dict[str, str] = {}
         self._last_price_refresh_reason: str = ""
         self._saved_mode: str = "paper"
+        self.real_holdings: list[dict] = []
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -292,11 +310,18 @@ class MainWindow(QMainWindow):
         real_layout = QHBoxLayout()
         self.account_combo = QComboBox()
         self.account_combo.setPlaceholderText("계좌를 선택하세요")
+        self.server_label = QLabel("서버: -")
+        self.account_pw_input = QLineEdit()
+        self.account_pw_input.setEchoMode(QLineEdit.Password)
+        self.account_pw_input.setPlaceholderText("계좌 비밀번호(조회용)")
         self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
         self.real_balance_label.setStyleSheet("color: gray;")
         self.real_balance_refresh = QPushButton("잔고 새로고침")
         real_layout.addWidget(QLabel("계좌"))
         real_layout.addWidget(self.account_combo)
+        real_layout.addWidget(self.server_label)
+        real_layout.addWidget(QLabel("비밀번호(조회)"))
+        real_layout.addWidget(self.account_pw_input)
         real_layout.addWidget(self.real_balance_label)
         real_layout.addWidget(self.real_balance_refresh)
         self.real_group.setLayout(real_layout)
@@ -466,6 +491,8 @@ class MainWindow(QMainWindow):
             self.openapi_widget.accounts_received.connect(self._on_accounts_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "balance_received"):
             self.openapi_widget.balance_received.connect(self._on_balance_received)
+        if self.openapi_widget and hasattr(self.openapi_widget, "holdings_received"):
+            self.openapi_widget.holdings_received.connect(self._on_holdings_received)
 
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
@@ -478,10 +505,12 @@ class MainWindow(QMainWindow):
             self.real_radio.setChecked(True)
         else:
             self.paper_radio.setChecked(True)
-        self._load_settings_for_mode(self._settings_mode())
+        self._load_strategy_settings()
+        self._apply_mode_enable()
+        self._save_current_settings()
 
-    def _load_settings_for_mode(self, mode: str) -> None:
-        prefix = f"{mode}/"
+    def _load_strategy_settings(self) -> None:
+        prefix = "strategy/"
         def getf(key: str, default: float) -> float:
             val = self.settings.value(prefix + key, default)
             try:
@@ -525,13 +554,11 @@ class MainWindow(QMainWindow):
             self.trailing_input.blockSignals(False)
             self.paper_cash_input.blockSignals(False)
             self.max_pos_input.blockSignals(False)
-        self._apply_mode_enable()
-        self._save_current_settings()
         self._apply_parameters_from_controls()
 
     def _save_current_settings(self) -> None:
         mode = self._settings_mode()
-        prefix = f"{mode}/"
+        prefix = "strategy/"
         self.settings.setValue("ui/mode", mode)
         self.settings.setValue(prefix + "stop_loss_pct", self.stop_loss_input.value())
         self.settings.setValue(prefix + "take_profit_pct", self.take_profit_input.value())
@@ -540,7 +567,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue(prefix + "max_positions", self.max_pos_input.value())
         self.settings.setValue(prefix + "eod_time", self.eod_time_edit.time().toString("HH:mm"))
         if mode == "real":
-            self.settings.setValue(prefix + "account_no", self.account_combo.currentText())
+            self.settings.setValue("connection/real/account_no", self.account_combo.currentText())
         self.settings.sync()
 
     def _apply_mode_enable(self) -> None:
@@ -563,6 +590,12 @@ class MainWindow(QMainWindow):
         self.strategy.update_parameters(**params)
         self.engine.set_paper_cash(self.paper_cash_input.value())
 
+    def _update_server_label(self, gubun: str) -> None:
+        text = "서버: -"
+        if gubun:
+            text = "서버: 모의" if gubun == "1" else "서버: 실서버"
+        self.server_label.setText(text)
+
     # Event handlers -----------------------------------------------------
     def on_mode_changed(self) -> None:
         mode = "paper" if self.paper_radio.isChecked() else "real"
@@ -571,14 +604,15 @@ class MainWindow(QMainWindow):
             self.real_balance_label.setStyleSheet("color: black;")
         else:
             self.real_balance_label.setStyleSheet("color: gray;")
-        self._load_settings_for_mode(mode)
+        if self.openapi_widget:
+            self._update_server_label(self.openapi_widget.get_server_gubun())
         self._refresh_account()
         self._update_connection_labels()
         self.status_label.setText("상태: 대기중")
         self._save_current_settings()
 
     def on_open_config(self) -> None:
-        dialog = ConfigDialog(self, self.current_config, self.kiwoom_client)
+        dialog = ConfigDialog(self, self.current_config, self.kiwoom_client, self.settings, self._settings_mode())
         if dialog.exec_() == QDialog.Accepted and dialog.result_config:
             self.current_config = dialog.result_config
             self.engine.update_credentials(self.current_config)
@@ -619,6 +653,7 @@ class MainWindow(QMainWindow):
             self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
             if self.openapi_widget:
                 self.openapi_widget.request_account_list()
+                self._update_server_label(self.openapi_widget.get_server_gubun())
             self._refresh_condition_list()
         else:
             self._log(f"[조건] OpenAPI 로그인 실패 (코드 {err_code})")
@@ -670,6 +705,9 @@ class MainWindow(QMainWindow):
         elif previous in accounts:
             self.account_combo.setCurrentText(previous)
         self._save_current_settings()
+        # 서버 구분 표시
+        if self.openapi_widget:
+            self._update_server_label(self.openapi_widget.get_server_gubun())
 
     @pyqtSlot(int, int)
     def _on_balance_received(self, cash: int, orderable: int) -> None:
@@ -677,13 +715,22 @@ class MainWindow(QMainWindow):
         self.real_balance_label.setText(f"실계좌 예수금(활성): {cash:,.0f}원 / 주문가능: {orderable:,.0f}원")
         self._log(f"[실거래] 예수금 수신: {cash:,.0f} / 주문가능 {orderable:,.0f}")
 
+    @pyqtSlot(list)
+    def _on_holdings_received(self, holdings: list) -> None:
+        self.real_holdings = holdings
+        self._log(f"[실거래] 보유종목 수신: {len(holdings)}건")
+        self._refresh_positions(market_open=self._is_market_open())
+
     def _on_account_selected(self, account: str) -> None:
         self._save_current_settings()
         if not account or self._settings_mode() != "real":
             return
         openapi = getattr(self.kiwoom_client, "openapi", None)
-        if openapi and hasattr(openapi, "request_balance"):
-            openapi.request_balance(account)
+        if openapi:
+            self._update_server_label(openapi.get_server_gubun())
+        if openapi and hasattr(openapi, "request_deposit_and_holdings"):
+            # 자동 조회는 하지 않고 새로고침 버튼을 유도
+            return
         else:
             self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음")
 
@@ -904,9 +951,19 @@ class MainWindow(QMainWindow):
             self._log("[실거래] 잔고 조회 불가: 계좌를 먼저 선택하세요.")
             return
         openapi = getattr(self.kiwoom_client, "openapi", None)
-        if openapi and hasattr(openapi, "request_balance") and openapi.connected:
-            openapi.request_balance(account)
-            self._log(f"[실거래] 잔고 조회 요청(account={account})")
+        if openapi:
+            gubun = openapi.get_server_gubun()
+            self._update_server_label(gubun)
+            if gubun == "1":
+                self._log("[경고] 현재 OpenAPI가 모의서버로 연결되어 있어 실계좌 조회/주문이 불가합니다.")
+                return
+        if openapi and hasattr(openapi, "request_deposit_and_holdings") and openapi.connected:
+            pw = self.account_pw_input.text().strip()
+            if not pw:
+                self._log("[실거래] 잔고 조회 불가: 계좌 비밀번호(조회용)를 입력하세요. (팝업 방지)")
+                return
+            openapi.request_deposit_and_holdings(account, pw)
+            self._log(f"[실거래] 잔고/보유종목 TR 요청(account={account})")
         else:
             self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음 또는 미로그인")
 
@@ -925,33 +982,50 @@ class MainWindow(QMainWindow):
         if market_open is None:
             market_open = self._is_market_open()
 
+        use_real_holdings = self.engine.broker_mode == "real" and self.real_holdings
         positions = list(self.strategy.positions.values())
-        self.positions_table.setRowCount(len(positions))
+        self.positions_table.setRowCount(len(self.real_holdings) if use_real_holdings else len(positions))
         price_refresh_reason = ""
 
-        for row, pos in enumerate(positions):
-            name = self._get_symbol_name(pos.symbol)
-            current_price = None
-            change_text = "--"
-            if not market_open:
-                price_refresh_reason = "[시세] 장전이라 시세 갱신을 건너뜁니다."
-            else:
-                try:
-                    current_price = self.engine.get_current_price(pos.symbol)
-                    if current_price and pos.entry_price:
-                        change_pct = (current_price - pos.entry_price) / pos.entry_price * 100
-                        change_text = f"{current_price:.2f} / {change_pct:.2f}%"
-                    elif current_price:
-                        change_text = f"{current_price:.2f}"
-                except Exception as exc:  # pragma: no cover - defensive
-                    price_refresh_reason = f"[시세] 실시간 시세 조회 실패({pos.symbol}): {exc}"
+        if use_real_holdings:
+            for row, h in enumerate(self.real_holdings):
+                code = h.get("code", "").strip()
+                name = h.get("name", "") or self._get_symbol_name(code)
+                qty = h.get("quantity", 0)
+                avg_price = float(h.get("avg_price", 0) or 0)
+                cur_price = float(h.get("current_price", 0) or 0)
+                pnl_rate = float(h.get("pnl_rate", 0) or 0)
+                change_text = f"{cur_price:.2f} / {pnl_rate:.2f}%"
+                self.positions_table.setItem(row, 0, QTableWidgetItem(code))
+                self.positions_table.setItem(row, 1, QTableWidgetItem(name))
+                self.positions_table.setItem(row, 2, QTableWidgetItem(str(qty)))
+                self.positions_table.setItem(row, 3, QTableWidgetItem(f"{avg_price:.2f}"))
+                self.positions_table.setItem(row, 4, QTableWidgetItem(f"{max(cur_price, avg_price):.2f}"))
+                self.positions_table.setItem(row, 5, QTableWidgetItem(change_text))
+        else:
+            for row, pos in enumerate(positions):
+                name = self._get_symbol_name(pos.symbol)
+                current_price = None
+                change_text = "--"
+                if not market_open:
+                    price_refresh_reason = "[시세] 장전이라 시세 갱신을 건너뜁니다."
+                else:
+                    try:
+                        current_price = self.engine.get_current_price(pos.symbol)
+                        if current_price and pos.entry_price:
+                            change_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+                            change_text = f"{current_price:.2f} / {change_pct:.2f}%"
+                        elif current_price:
+                            change_text = f"{current_price:.2f}"
+                    except Exception as exc:  # pragma: no cover - defensive
+                        price_refresh_reason = f"[시세] 실시간 시세 조회 실패({pos.symbol}): {exc}"
 
-            self.positions_table.setItem(row, 0, QTableWidgetItem(pos.symbol))
-            self.positions_table.setItem(row, 1, QTableWidgetItem(name))
-            self.positions_table.setItem(row, 2, QTableWidgetItem(str(pos.quantity)))
-            self.positions_table.setItem(row, 3, QTableWidgetItem(f"{pos.entry_price:.2f}"))
-            self.positions_table.setItem(row, 4, QTableWidgetItem(f"{pos.highest_price:.2f}"))
-            self.positions_table.setItem(row, 5, QTableWidgetItem(change_text))
+                self.positions_table.setItem(row, 0, QTableWidgetItem(pos.symbol))
+                self.positions_table.setItem(row, 1, QTableWidgetItem(name))
+                self.positions_table.setItem(row, 2, QTableWidgetItem(str(pos.quantity)))
+                self.positions_table.setItem(row, 3, QTableWidgetItem(f"{pos.entry_price:.2f}"))
+                self.positions_table.setItem(row, 4, QTableWidgetItem(f"{pos.highest_price:.2f}"))
+                self.positions_table.setItem(row, 5, QTableWidgetItem(change_text))
 
         if price_refresh_reason and price_refresh_reason != self._last_price_refresh_reason:
             self._log(price_refresh_reason)

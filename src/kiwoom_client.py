@@ -234,7 +234,8 @@ class KiwoomClient:
             return self._master_name_cache[code]
 
         name = ""
-        if self.use_openapi and self.openapi and sys.platform.startswith("win"):
+        if self.openapi and self.openapi.connected and sys.platform.startswith("win"):
+            self.use_openapi = True
             try:
                 ax = getattr(self.openapi, "ax", None)
                 if ax and hasattr(ax, "dynamicCall"):

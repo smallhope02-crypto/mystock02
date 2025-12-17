@@ -101,6 +101,12 @@ class _DisabledOpenAPI:
     def request_balance(self, account_no: str, rqname: str = "opw00001-balance") -> None:
         return None
 
+    def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
+        return False
+
+    def get_server_gubun(self) -> str:
+        return ""
+
 
 if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore
@@ -120,6 +126,7 @@ else:
         real_condition_received = QtCore.pyqtSignal(str, str, str, str)
         accounts_received = QtCore.pyqtSignal(list)
         balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
+        holdings_received = QtCore.pyqtSignal(list)  # list of dicts
 
         def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
@@ -139,6 +146,7 @@ else:
             self.ax: Optional[QAxWidget] = None
             self._condition_load_requested: bool = False
             self.accounts: List[str] = []
+            self.server_gubun: str = ""
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -430,6 +438,8 @@ else:
                 raw_accounts = ""
                 if ax and hasattr(ax, "dynamicCall"):
                     raw_accounts = str(ax.dynamicCall("GetLoginInfo(QString)", "ACCNO") or "")
+                    gubun = str(ax.dynamicCall("GetLoginInfo(QString)", "GetServerGubun") or "")
+                    self.server_gubun = gubun
                 accounts = [acc for acc in raw_accounts.split(";") if acc]
                 self.accounts = accounts
                 print(f"[OpenAPI] 계좌 목록 {len(accounts)}건 로딩 완료: {accounts[:3]}")
@@ -438,32 +448,69 @@ else:
                 print(f"[OpenAPI] 계좌 목록 조회 실패: {exc}")
                 traceback.print_exc()
 
-        def request_balance(self, account_no: str, rqname: str = "opw00001-balance") -> None:
-            """Request balance via opw00001."""
+        def get_server_gubun(self) -> str:
+            """Return Kiwoom server gubun (mock/real)."""
 
             if not self.is_enabled():
-                print("[OpenAPI] 잔고 조회 불가: 컨트롤 비활성")
-                return
+                return ""
+            if self.server_gubun:
+                return self.server_gubun
             try:
                 ax = self.ax
                 if ax and hasattr(ax, "dynamicCall"):
-                    ax.dynamicCall(
-                        "SetInputValue(QString, QString)", "계좌번호", account_no
-                    )
-                    ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", "")
-                    ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
-                    ax.dynamicCall("SetInputValue(QString, QString)", "조회구분", "2")
-                    ax.dynamicCall(
-                        "CommRqData(QString, QString, int, QString)",
-                        rqname,
-                        "opw00001",
-                        0,
-                        self.screen_no,
-                    )
-                    print(f"[OpenAPI] 잔고 조회 요청(opw00001) account={account_no}")
+                    self.server_gubun = str(ax.dynamicCall("GetLoginInfo(QString)", "GetServerGubun") or "")
             except Exception as exc:  # pragma: no cover
-                print(f"[OpenAPI] 잔고 조회 요청 실패: {exc}")
+                print(f"[OpenAPI] GetServerGubun 실패: {exc}")
+            return self.server_gubun
+
+        def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
+            """Request deposit (opw00001) and holdings (opw00018)."""
+
+            if not self.is_enabled():
+                print("[OpenAPI] 잔고 조회 불가: 컨트롤 비활성")
+                return False
+            if not account_pw:
+                print("[OpenAPI] 잔고 조회 중단: 계좌 비밀번호 미입력")
+                print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
+                return False
+            try:
+                ax = self.ax
+                if not (ax and hasattr(ax, "dynamicCall")):
+                    print("[OpenAPI] dynamicCall 불가: ax 없음")
+                    return False
+
+                # opw00001 - deposit
+                ax.dynamicCall("SetInputValue(QString, QString)", "계좌번호", account_no)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", account_pw)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
+                ax.dynamicCall("SetInputValue(QString, QString)", "조회구분", "2")
+                ax.dynamicCall(
+                    "CommRqData(QString, QString, int, QString)",
+                    "opw00001-balance",
+                    "opw00001",
+                    0,
+                    self.screen_no,
+                )
+                # opw00018 - holdings
+                ax.dynamicCall("SetInputValue(QString, QString)", "계좌번호", account_no)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", account_pw)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
+                ax.dynamicCall("SetInputValue(QString, QString)", "상장폐지조회구분", "0")
+                ax.dynamicCall(
+                    "CommRqData(QString, QString, int, QString)",
+                    "opw00018-holdings",
+                    "opw00018",
+                    0,
+                    self.screen_no,
+                )
+                print(f"[OpenAPI] 잔고/보유 종목 조회 요청(opw00001/opw00018) account={account_no}")
+                return True
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] 잔고/보유 종목 조회 요청 실패: {exc}")
                 traceback.print_exc()
+                if "44" in str(exc):
+                    print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
+                return False
 
         def _on_receive_tr_data(self, *args) -> None:
             """Generic TR handler focusing on balance requests."""
@@ -481,6 +528,8 @@ else:
 
                 if rqname == "opw00001-balance":
                     self._parse_balance(trcode, rqname)
+                elif rqname == "opw00018-holdings":
+                    self._parse_holdings(trcode, rqname)
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] OnReceiveTrData 처리 실패: {exc}")
                 traceback.print_exc()
@@ -503,6 +552,52 @@ else:
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] 잔고 파싱 실패: {exc}")
                 traceback.print_exc()
+                if "44" in str(exc):
+                    print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
+
+        def _parse_holdings(self, trcode: str, rqname: str) -> None:
+            """Parse opw00018 보유 종목 내역."""
+
+            holdings: List[dict] = []
+            try:
+                ax = self.ax
+                if not (ax and hasattr(ax, "dynamicCall")):
+                    return
+                count = ax.dynamicCall("GetRepeatCnt(QString, QString)", trcode, rqname)
+                try:
+                    cnt = int(count)
+                except Exception:
+                    cnt = 0
+                for i in range(cnt):
+                    code = str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "종목코드")).strip()
+                    name = str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "종목명")).strip()
+                    qty = int(str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "보유수량")).strip() or "0")
+                    avg_price = float(
+                        str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "평균단가")).strip() or "0"
+                    )
+                    cur_price = float(
+                        str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "현재가")).strip() or "0"
+                    )
+                    pnl_rate = float(
+                        str(ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, "수익률")).strip() or "0"
+                    )
+                    holdings.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "quantity": qty,
+                            "avg_price": avg_price,
+                            "current_price": cur_price,
+                            "pnl_rate": pnl_rate,
+                        }
+                    )
+                print(f"[OpenAPI] opw00018 수신: 보유종목 {len(holdings)}건")
+                self.holdings_received.emit(holdings)
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] 보유종목 파싱 실패: {exc}")
+                traceback.print_exc()
+                if "44" in str(exc):
+                    print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
 
 
 __all__ = ["KiwoomOpenAPI", "QAX_AVAILABLE"]

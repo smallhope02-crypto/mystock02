@@ -6,7 +6,7 @@ import sys
 from typing import List, Optional
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, pyqtSlot
+    from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
     from PyQt5.QtWidgets import (
         QApplication,
         QButtonGroup,
@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mystock02 Auto Trader")
 
+        self.settings = QSettings("Mystock02", "AutoTrader")
         self.current_config = load_config()
         self.strategy = Strategy()
         self.kiwoom_client = KiwoomClient(
@@ -211,6 +212,7 @@ class MainWindow(QMainWindow):
         self.market_end = datetime.time(15, 20)
         self._name_cache: dict[str, str] = {}
         self._last_price_refresh_reason: str = ""
+        self._saved_mode: str = "paper"
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -231,6 +233,8 @@ class MainWindow(QMainWindow):
                 flush=True,
             )
             # 상태가 비활성이라면 사용자 버튼 클릭 시 재초기화를 안내한다.
+        self._load_settings()
+        self._apply_mode_enable()
         self._refresh_condition_list()
         self._refresh_account()
         self._refresh_positions()
@@ -270,15 +274,35 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.real_status_label)
         conn_layout.addLayout(status_layout)
 
-        balance_layout = QHBoxLayout()
+        # Paper mode settings
+        self.paper_group = QGroupBox("모의 모드 설정")
+        paper_layout = QHBoxLayout()
+        self.paper_cash_input = QDoubleSpinBox()
+        self.paper_cash_input.setRange(100_000, 10_000_000_000)
+        self.paper_cash_input.setDecimals(0)
+        self.paper_cash_input.setPrefix("₩")
+        paper_layout.addWidget(QLabel("모의 예수금"))
+        paper_layout.addWidget(self.paper_cash_input)
         self.paper_balance_label = QLabel("모의 잔고(활성): -")
+        paper_layout.addWidget(self.paper_balance_label)
+        self.paper_group.setLayout(paper_layout)
+
+        # Real mode settings
+        self.real_group = QGroupBox("실거래 모드 설정")
+        real_layout = QHBoxLayout()
+        self.account_combo = QComboBox()
+        self.account_combo.setPlaceholderText("계좌를 선택하세요")
         self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
         self.real_balance_label.setStyleSheet("color: gray;")
         self.real_balance_refresh = QPushButton("잔고 새로고침")
-        balance_layout.addWidget(self.paper_balance_label)
-        balance_layout.addWidget(self.real_balance_label)
-        balance_layout.addWidget(self.real_balance_refresh)
-        conn_layout.addLayout(balance_layout)
+        real_layout.addWidget(QLabel("계좌"))
+        real_layout.addWidget(self.account_combo)
+        real_layout.addWidget(self.real_balance_label)
+        real_layout.addWidget(self.real_balance_refresh)
+        self.real_group.setLayout(real_layout)
+
+        conn_layout.addWidget(self.paper_group)
+        conn_layout.addWidget(self.real_group)
 
         conn_group.setLayout(conn_layout)
         main.addWidget(conn_group)
@@ -337,12 +361,6 @@ class MainWindow(QMainWindow):
         self.time_limit_input.setValue(0)
         self.time_limit_input.setSuffix(" 분")
 
-        self.cash_input = QDoubleSpinBox()
-        self.cash_input.setRange(100_000, 10_000_000_000)
-        self.cash_input.setValue(self.strategy.initial_cash)
-        self.cash_input.setPrefix("₩")
-        self.cash_input.setDecimals(0)
-
         self.max_pos_input = QSpinBox()
         self.max_pos_input.setRange(1, 50)
         self.max_pos_input.setValue(self.strategy.max_positions)
@@ -372,7 +390,6 @@ class MainWindow(QMainWindow):
         param_layout.addRow("익절률", self.take_profit_input)
         param_layout.addRow("트레일링 스탑", self.trailing_input)
         param_layout.addRow("보유 시간 제한", self.time_limit_input)
-        param_layout.addRow("모의 예수금", self.cash_input)
         param_layout.addRow("최대 보유 종목 수", self.max_pos_input)
         param_layout.addRow(self.eod_checkbox, self.eod_time_edit)
 
@@ -408,10 +425,11 @@ class MainWindow(QMainWindow):
             self.take_profit_input,
             self.trailing_input,
             self.time_limit_input,
-            self.cash_input,
             self.max_pos_input,
         ):
             widget.valueChanged.connect(self._mark_dirty)
+            widget.valueChanged.connect(lambda _=None: self._save_current_settings())
+        self.paper_cash_input.valueChanged.connect(self._save_current_settings)
 
         self.apply_btn.clicked.connect(self.on_apply_strategy)
         self.test_btn.clicked.connect(self.on_run_once)
@@ -422,6 +440,7 @@ class MainWindow(QMainWindow):
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
+        self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
             self._log(
                 f"[DEBUG] login_result signal object: {self.openapi_widget.login_result!r}"
@@ -443,19 +462,120 @@ class MainWindow(QMainWindow):
             self.openapi_widget.tr_condition_received.connect(self._on_tr_condition_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "real_condition_received"):
             self.openapi_widget.real_condition_received.connect(self._on_real_condition_received)
+        if self.openapi_widget and hasattr(self.openapi_widget, "accounts_received"):
+            self.openapi_widget.accounts_received.connect(self._on_accounts_received)
+        if self.openapi_widget and hasattr(self.openapi_widget, "balance_received"):
+            self.openapi_widget.balance_received.connect(self._on_balance_received)
+
+    # Settings ---------------------------------------------------------
+    def _settings_mode(self) -> str:
+        return "paper" if self.paper_radio.isChecked() else "real"
+
+    def _load_settings(self) -> None:
+        mode = self.settings.value("ui/mode", "paper")
+        self._saved_mode = str(mode)
+        if self._saved_mode == "real":
+            self.real_radio.setChecked(True)
+        else:
+            self.paper_radio.setChecked(True)
+        self._load_settings_for_mode(self._settings_mode())
+
+    def _load_settings_for_mode(self, mode: str) -> None:
+        prefix = f"{mode}/"
+        def getf(key: str, default: float) -> float:
+            val = self.settings.value(prefix + key, default)
+            try:
+                return float(val)
+            except Exception:
+                return default
+
+        def geti(key: str, default: int) -> int:
+            val = self.settings.value(prefix + key, default)
+            try:
+                return int(val)
+            except Exception:
+                return default
+
+        stop = getf("stop_loss_pct", self.strategy.stop_loss_pct * 100)
+        take = getf("take_profit_pct", self.strategy.take_profit_pct * 100)
+        trail = getf("trailing_pct", self.strategy.trailing_stop_pct * 100)
+        paper_cash = getf("paper_cash", self.strategy.initial_cash)
+        max_pos = geti("max_positions", self.strategy.max_positions)
+        eod_time = self.settings.value(prefix + "eod_time", "15:20")
+
+        self.stop_loss_input.blockSignals(True)
+        self.take_profit_input.blockSignals(True)
+        self.trailing_input.blockSignals(True)
+        self.paper_cash_input.blockSignals(True)
+        self.max_pos_input.blockSignals(True)
+        try:
+            self.stop_loss_input.setValue(stop)
+            self.take_profit_input.setValue(take)
+            self.trailing_input.setValue(trail)
+            self.paper_cash_input.setValue(paper_cash)
+            self.max_pos_input.setValue(max_pos)
+            try:
+                h, m = map(int, str(eod_time).split(":"))
+                self.eod_time_edit.setTime(datetime.time(h, m))
+            except Exception:
+                pass
+        finally:
+            self.stop_loss_input.blockSignals(False)
+            self.take_profit_input.blockSignals(False)
+            self.trailing_input.blockSignals(False)
+            self.paper_cash_input.blockSignals(False)
+            self.max_pos_input.blockSignals(False)
+        self._apply_mode_enable()
+        self._save_current_settings()
+        self._apply_parameters_from_controls()
+
+    def _save_current_settings(self) -> None:
+        mode = self._settings_mode()
+        prefix = f"{mode}/"
+        self.settings.setValue("ui/mode", mode)
+        self.settings.setValue(prefix + "stop_loss_pct", self.stop_loss_input.value())
+        self.settings.setValue(prefix + "take_profit_pct", self.take_profit_input.value())
+        self.settings.setValue(prefix + "trailing_pct", self.trailing_input.value())
+        self.settings.setValue(prefix + "paper_cash", self.paper_cash_input.value())
+        self.settings.setValue(prefix + "max_positions", self.max_pos_input.value())
+        self.settings.setValue(prefix + "eod_time", self.eod_time_edit.time().toString("HH:mm"))
+        if mode == "real":
+            self.settings.setValue(prefix + "account_no", self.account_combo.currentText())
+        self.settings.sync()
+
+    def _apply_mode_enable(self) -> None:
+        mode = self._settings_mode()
+        self.paper_group.setEnabled(mode == "paper")
+        self.real_group.setEnabled(mode == "real")
+        if mode == "paper":
+            self.real_balance_label.setStyleSheet("color: gray;")
+        else:
+            self.real_balance_label.setStyleSheet("color: black;")
+
+    def _apply_parameters_from_controls(self) -> None:
+        params = dict(
+            initial_cash=self.paper_cash_input.value(),
+            max_positions=self.max_pos_input.value(),
+            stop_loss_pct=self.stop_loss_input.value() / 100,
+            take_profit_pct=self.take_profit_input.value() / 100,
+            trailing_stop_pct=self.trailing_input.value() / 100,
+        )
+        self.strategy.update_parameters(**params)
+        self.engine.set_paper_cash(self.paper_cash_input.value())
 
     # Event handlers -----------------------------------------------------
     def on_mode_changed(self) -> None:
         mode = "paper" if self.paper_radio.isChecked() else "real"
         self.engine.set_mode(mode)
-        self.cash_input.setEnabled(mode == "paper")
         if mode == "real":
             self.real_balance_label.setStyleSheet("color: black;")
         else:
             self.real_balance_label.setStyleSheet("color: gray;")
+        self._load_settings_for_mode(mode)
         self._refresh_account()
         self._update_connection_labels()
         self.status_label.setText("상태: 대기중")
+        self._save_current_settings()
 
     def on_open_config(self) -> None:
         dialog = ConfigDialog(self, self.current_config, self.kiwoom_client)
@@ -497,6 +617,8 @@ class MainWindow(QMainWindow):
     def _on_openapi_login_result(self, err_code: int) -> None:
         if err_code == 0:
             self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
+            if self.openapi_widget:
+                self.openapi_widget.request_account_list()
             self._refresh_condition_list()
         else:
             self._log(f"[조건] OpenAPI 로그인 실패 (코드 {err_code})")
@@ -533,6 +655,37 @@ class MainWindow(QMainWindow):
         self._log(
             f"[조건] 실시간 {action} 이벤트 - {code} (조건 {condition_name}/{condition_index}), 총 {len(self.condition_universe)}건"
         )
+
+    @pyqtSlot(list)
+    def _on_accounts_received(self, accounts: list) -> None:
+        self._log(f"[조건] 계좌 목록 수신: {len(accounts)}건")
+        previous = self.account_combo.currentText()
+        self.account_combo.clear()
+        for acc in accounts:
+            self.account_combo.addItem(acc)
+        # restore saved selection if available
+        saved = self.settings.value("real/account_no", "")
+        if saved and saved in accounts:
+            self.account_combo.setCurrentText(saved)
+        elif previous in accounts:
+            self.account_combo.setCurrentText(previous)
+        self._save_current_settings()
+
+    @pyqtSlot(int, int)
+    def _on_balance_received(self, cash: int, orderable: int) -> None:
+        self.real_balance_label.setStyleSheet("color: black;")
+        self.real_balance_label.setText(f"실계좌 예수금(활성): {cash:,.0f}원 / 주문가능: {orderable:,.0f}원")
+        self._log(f"[실거래] 예수금 수신: {cash:,.0f} / 주문가능 {orderable:,.0f}")
+
+    def _on_account_selected(self, account: str) -> None:
+        self._save_current_settings()
+        if not account or self._settings_mode() != "real":
+            return
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if openapi and hasattr(openapi, "request_balance"):
+            openapi.request_balance(account)
+        else:
+            self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음")
 
     def _selected_condition(self) -> str:
         combo_value = self.condition_combo.currentText().strip()
@@ -597,19 +750,20 @@ class MainWindow(QMainWindow):
 
     def on_apply_strategy(self) -> None:
         params = dict(
-            initial_cash=self.cash_input.value(),
+            initial_cash=self.paper_cash_input.value(),
             max_positions=self.max_pos_input.value(),
             stop_loss_pct=self.stop_loss_input.value() / 100,
             take_profit_pct=self.take_profit_input.value() / 100,
             trailing_stop_pct=self.trailing_input.value() / 100,
         )
         self.strategy.update_parameters(**params)
-        self.engine.set_paper_cash(self.cash_input.value())
+        self.engine.set_paper_cash(self.paper_cash_input.value())
         self.dirty_label.hide()
         self.status_label.setText(
             f"전략 적용 완료 ({datetime.datetime.now().strftime('%H:%M:%S')})"
         )
         self._refresh_account()
+        self._save_current_settings()
 
     def on_run_once(self) -> None:
         if self.engine.broker_mode == "real":
@@ -732,15 +886,10 @@ class MainWindow(QMainWindow):
             self.real_balance_label.setText("실계좌 예수금: 실거래 모드에서만 표시")
             self.real_balance_label.setStyleSheet("color: gray;")
         else:
-            try:
-                balance = self.kiwoom_client.get_real_balance()
-                self.real_balance_label.setStyleSheet("color: black;")
-                self.real_balance_label.setText(f"실계좌 예수금(활성): {balance:,.0f}원")
-            except Exception as exc:  # pragma: no cover - UI fallback
-                self.real_balance_label.setStyleSheet("color: black;")
-                self.real_balance_label.setText("실계좌 예수금: 조회 실패")
-                self._log(f"실계좌 예수금 조회 실패: {exc}")
-
+            # 유지: 잔고는 OnReceiveTrData(opw00001)에서 갱신
+            self.real_balance_label.setStyleSheet("color: black;")
+            if "예수금(활성)" not in self.real_balance_label.text():
+                self.real_balance_label.setText("실계좌 예수금: 잔고 새로고침을 누르세요")
             self.paper_balance_label.setText("모의 잔고: 모의 모드에서만 갱신")
         self._update_connection_labels()
 
@@ -750,12 +899,16 @@ class MainWindow(QMainWindow):
             self._log("모의 잔고를 새로고침했습니다.")
             return
 
-        try:
-            balance = self.kiwoom_client.get_real_balance()
-            self.real_balance_label.setText(f"실계좌 예수금(활성): {balance:,.0f}원")
-        except Exception as exc:  # pragma: no cover - UI fallback
-            self.real_balance_label.setText("실계좌 예수금: 조회 실패")
-            self._log(f"실계좌 예수금 조회 실패: {exc}")
+        account = self.account_combo.currentText().strip()
+        if not account:
+            self._log("[실거래] 잔고 조회 불가: 계좌를 먼저 선택하세요.")
+            return
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if openapi and hasattr(openapi, "request_balance") and openapi.connected:
+            openapi.request_balance(account)
+            self._log(f"[실거래] 잔고 조회 요청(account={account})")
+        else:
+            self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음 또는 미로그인")
 
     def _get_symbol_name(self, code: str) -> str:
         if code in self._name_cache:

@@ -46,6 +46,7 @@ class _DisabledOpenAPI:
         self.ax = None
         if _QAX_IMPORT_ERROR:
             print(f"[OpenAPI] QAx unavailable: {_QAX_IMPORT_ERROR}")
+        self.accounts = []
 
     # Compatibility helpers --------------------------------------------
     def debug_status(self) -> str:
@@ -94,6 +95,12 @@ class _DisabledOpenAPI:
     def get_last_universe(self) -> List[str]:
         return []
 
+    def request_account_list(self) -> None:
+        return None
+
+    def request_balance(self, account_no: str, rqname: str = "opw00001-balance") -> None:
+        return None
+
 
 if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore
@@ -111,6 +118,8 @@ else:
         condition_ver_received = QtCore.pyqtSignal(int, str)
         tr_condition_received = QtCore.pyqtSignal(str, str, str, int, str)
         real_condition_received = QtCore.pyqtSignal(str, str, str, str)
+        accounts_received = QtCore.pyqtSignal(list)
+        balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
 
         def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
@@ -129,6 +138,7 @@ else:
             self._control: Optional[object] = None
             self.ax: Optional[QAxWidget] = None
             self._condition_load_requested: bool = False
+            self.accounts: List[str] = []
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -179,6 +189,7 @@ else:
                 "OnReceiveConditionVer": self._on_receive_condition_ver,
                 "OnReceiveTrCondition": self._on_receive_tr_condition,
                 "OnReceiveRealCondition": self._on_receive_real_condition,
+                "OnReceiveTrData": self._on_receive_tr_data,
             }
 
             for name, handler in bindings.items():
@@ -371,6 +382,7 @@ else:
             self.login_result.emit(ec)
             if self.connected:
                 self.load_conditions()
+                self.request_account_list()
 
         def _on_receive_condition_ver(self, lRet: int, sMsg: str) -> None:
             print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
@@ -408,6 +420,89 @@ else:
                 f"[OpenAPI] OnReceiveRealCondition code={code} event={event} condition={condition_name} index={condition_index}"
             )
             self.real_condition_received.emit(str(code), str(event), str(condition_name), str(condition_index))
+
+        # -- Accounts / balances ----------------------------------------
+        def request_account_list(self) -> None:
+            if not self.is_enabled():
+                return
+            try:
+                ax = self.ax
+                raw_accounts = ""
+                if ax and hasattr(ax, "dynamicCall"):
+                    raw_accounts = str(ax.dynamicCall("GetLoginInfo(QString)", "ACCNO") or "")
+                accounts = [acc for acc in raw_accounts.split(";") if acc]
+                self.accounts = accounts
+                print(f"[OpenAPI] 계좌 목록 {len(accounts)}건 로딩 완료: {accounts[:3]}")
+                self.accounts_received.emit(accounts)
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                print(f"[OpenAPI] 계좌 목록 조회 실패: {exc}")
+                traceback.print_exc()
+
+        def request_balance(self, account_no: str, rqname: str = "opw00001-balance") -> None:
+            """Request balance via opw00001."""
+
+            if not self.is_enabled():
+                print("[OpenAPI] 잔고 조회 불가: 컨트롤 비활성")
+                return
+            try:
+                ax = self.ax
+                if ax and hasattr(ax, "dynamicCall"):
+                    ax.dynamicCall(
+                        "SetInputValue(QString, QString)", "계좌번호", account_no
+                    )
+                    ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", "")
+                    ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
+                    ax.dynamicCall("SetInputValue(QString, QString)", "조회구분", "2")
+                    ax.dynamicCall(
+                        "CommRqData(QString, QString, int, QString)",
+                        rqname,
+                        "opw00001",
+                        0,
+                        self.screen_no,
+                    )
+                    print(f"[OpenAPI] 잔고 조회 요청(opw00001) account={account_no}")
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] 잔고 조회 요청 실패: {exc}")
+                traceback.print_exc()
+
+        def _on_receive_tr_data(self, *args) -> None:
+            """Generic TR handler focusing on balance requests."""
+
+            try:
+                # Kiwoom TR signature varies; unpack defensively
+                if len(args) >= 4:
+                    screen_no, rqname, trcode, _record = args[:4]
+                else:
+                    print(f"[OpenAPI] OnReceiveTrData 인자 부족: {args}")
+                    return
+                rqname = str(rqname)
+                trcode = str(trcode)
+                print(f"[OpenAPI] OnReceiveTrData rqname={rqname} trcode={trcode}")
+
+                if rqname == "opw00001-balance":
+                    self._parse_balance(trcode, rqname)
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] OnReceiveTrData 처리 실패: {exc}")
+                traceback.print_exc()
+
+        def _parse_balance(self, trcode: str, rqname: str) -> None:
+            """Parse opw00001 예수금상세현황요청 response."""
+
+            try:
+                ax = self.ax
+                if not (ax and hasattr(ax, "dynamicCall")):
+                    return
+                cash_str = ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, 0, "예수금")
+                orderable_str = ax.dynamicCall(
+                    "GetCommData(QString, QString, int, QString)", trcode, rqname, 0, "주문가능금액"
+                )
+                cash = int(str(cash_str).strip() or "0")
+                orderable = int(str(orderable_str).strip() or "0")
+                print(f"[OpenAPI] opw00001 수신: 예수금={cash} 주문가능={orderable}")
+                self.balance_received.emit(cash, orderable)
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] 잔고 파싱 실패: {exc}")
+                traceback.print_exc()
 
 
 __all__ = ["KiwoomOpenAPI", "QAX_AVAILABLE"]

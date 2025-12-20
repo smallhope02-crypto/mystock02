@@ -394,6 +394,8 @@ else:
             print(f"[OpenAPI] OnEventConnect err_code={ec} enabled={self.enabled}")
             self.login_result.emit(ec)
             if self.connected:
+                # clear cached server info so we always read the latest value after login
+                self.server_gubun = ""
                 raw = self.get_server_gubun_raw()
                 self.server_gubun_changed.emit(raw)
                 self.load_conditions()
@@ -462,12 +464,12 @@ else:
 
             if not self.is_enabled():
                 return ""
-            if self.server_gubun:
-                return self.server_gubun
             try:
                 ax = self.ax
+                raw = ""
                 if ax and hasattr(ax, "dynamicCall"):
-                    self.server_gubun = str(ax.dynamicCall("GetLoginInfo(QString)", "GetServerGubun") or "")
+                    raw = str(ax.dynamicCall("GetLoginInfo(QString)", "GetServerGubun") or "")
+                self.server_gubun = raw
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] GetServerGubun 실패: {exc}")
             return self.server_gubun

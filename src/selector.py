@@ -60,6 +60,10 @@ class UniverseSelector:
             return list(self.external_universe)
 
         base_universe = self._load_base_universe(condition_name)
+        if not base_universe:
+            logger.info("[유니버스] 조건 결과 없음 → 선택 스킵")
+            return []
+
         composite_score: Dict[str, float] = {symbol: 0.0 for symbol in base_universe}
 
         for scorer in self.scorers:
@@ -85,8 +89,8 @@ class UniverseSelector:
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.exception("Kiwoom condition universe failed: %s", exc)
 
-        random.seed(condition_name)
-        return [f"SYM{num:03d}" for num in random.sample(range(1, 30), 10)]
+        # 조건검색 결과가 없을 때는 매매를 스킵하도록 빈 리스트 반환
+        return []
 
     def _score_market_trend(self, symbols: List[str]) -> Dict[str, float]:
         """Score symbols by market trend (dummy implementation)."""

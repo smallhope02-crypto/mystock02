@@ -107,6 +107,9 @@ class _DisabledOpenAPI:
     def get_server_gubun(self) -> str:
         return ""
 
+    def get_server_gubun_raw(self) -> str:
+        return ""
+
 
 if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore

@@ -475,6 +475,22 @@ class MainWindow(QMainWindow):
                 self._log(
                     "[DEBUG] login_result 시그널을 _on_openapi_login_result 슬롯에 연결했습니다."
                 )
+            except TypeError as exc:
+                # 일부 환경에서 시그니처 해석이 실패하는 경우 람다로 우회 연결
+                self._log(
+                    f"[WARN] login_result 직접 연결 실패: {exc}; lambda 어댑터로 재시도합니다."
+                )
+                try:
+                    self.openapi_widget.login_result.connect(
+                        lambda err: self._on_openapi_login_result(int(err))
+                    )
+                    self._log(
+                        "[DEBUG] login_result 람다 어댑터로 슬롯 연결 성공"
+                    )
+                except Exception as inner:  # pragma: no cover - defensive
+                    self._log(
+                        f"[ERROR] login_result 연결 재시도 실패: {inner}; 시그니처를 확인하세요."
+                    )
             except Exception as exc:
                 self._log(
                     f"[ERROR] login_result 연결 실패: {exc}; 시그니처를 확인하세요."
@@ -495,8 +511,6 @@ class MainWindow(QMainWindow):
             self.openapi_widget.holdings_received.connect(self._on_holdings_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "server_gubun_changed"):
             self.openapi_widget.server_gubun_changed.connect(self._on_server_gubun_changed)
-        if self.openapi_widget and hasattr(self.openapi_widget, "holdings_received"):
-            self.openapi_widget.holdings_received.connect(self._on_holdings_received)
 
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
@@ -514,16 +528,16 @@ class MainWindow(QMainWindow):
         self._save_current_settings()
 
     def _load_strategy_settings(self) -> None:
-        prefix = "strategy/"
+        mode_prefix = f"strategy/{self._settings_mode()}/"
         def getf(key: str, default: float) -> float:
-            val = self.settings.value(prefix + key, default)
+            val = self.settings.value(mode_prefix + key, default)
             try:
                 return float(val)
             except Exception:
                 return default
 
         def geti(key: str, default: int) -> int:
-            val = self.settings.value(prefix + key, default)
+            val = self.settings.value(mode_prefix + key, default)
             try:
                 return int(val)
             except Exception:
@@ -534,7 +548,7 @@ class MainWindow(QMainWindow):
         trail = getf("trailing_pct", self.strategy.trailing_stop_pct * 100)
         paper_cash = getf("paper_cash", self.strategy.initial_cash)
         max_pos = geti("max_positions", self.strategy.max_positions)
-        eod_time = self.settings.value(prefix + "eod_time", "15:20")
+        eod_time = self.settings.value(mode_prefix + "eod_time", "15:20")
 
         self.stop_loss_input.blockSignals(True)
         self.take_profit_input.blockSignals(True)
@@ -562,7 +576,7 @@ class MainWindow(QMainWindow):
 
     def _save_current_settings(self) -> None:
         mode = self._settings_mode()
-        prefix = "strategy/"
+        prefix = f"strategy/{mode}/"
         self.settings.setValue("ui/mode", mode)
         self.settings.setValue(prefix + "stop_loss_pct", self.stop_loss_input.value())
         self.settings.setValue(prefix + "take_profit_pct", self.take_profit_input.value())
@@ -612,6 +626,7 @@ class MainWindow(QMainWindow):
             self.real_balance_label.setStyleSheet("color: gray;")
         if self.openapi_widget:
             self._update_server_label(self.openapi_widget.get_server_gubun())
+        self._load_strategy_settings()
         self._refresh_account()
         self._update_connection_labels()
         self.status_label.setText("상태: 대기중")
@@ -660,6 +675,7 @@ class MainWindow(QMainWindow):
             if self.openapi_widget:
                 self.openapi_widget.request_account_list()
                 raw = self.openapi_widget.get_server_gubun_raw()
+                self._log(f"[DEBUG] GetServerGubun raw={raw!r} (login_result)")
                 self._update_server_label(raw)
             self._refresh_condition_list()
         else:
@@ -734,6 +750,11 @@ class MainWindow(QMainWindow):
         decision = "SIMULATION" if raw == "1" else "REAL_OR_UNKNOWN"
         self._log(f"[DEBUG] GetServerGubun raw={raw!r}")
         self._log(f"[DEBUG] server_decision={decision} ui_mode={'REAL' if self.real_radio.isChecked() else 'SIM'}")
+        if self.real_radio.isChecked() and decision == "SIMULATION":
+            self._log(
+                "[경고] 실거래 모드이지만 모의서버(raw='1')로 접속되어 실계좌 조회/주문이 차단됩니다. "
+                "OpenAPI 로그아웃 후 실서버로 다시 로그인하세요."
+            )
 
     def _on_account_selected(self, account: str) -> None:
         self._save_current_settings()
@@ -974,6 +995,10 @@ class MainWindow(QMainWindow):
                     "실서버로 다시 로그인하세요 (로그아웃 후 로그인창에서 모의투자 체크 해제)."
                 )
                 return
+            else:
+                self._log(
+                    f"[INFO] 서버 구분(raw={gubun!r}) 기반으로 실거래 잔고 조회를 진행합니다."
+                )
         if openapi and hasattr(openapi, "request_deposit_and_holdings") and openapi.connected:
             pw = self.account_pw_input.text().strip()
             if not pw:

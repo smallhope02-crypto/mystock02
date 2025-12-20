@@ -42,6 +42,9 @@ class KiwoomClient:
         self.openapi: KiwoomOpenAPI | None = None
         self.use_openapi = False
         self._master_name_cache: Dict[str, str] = {}
+        self._real_cash: int = 0
+        self._real_orderable: int = 0
+        self._real_holdings: list = []
 
     def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
         """Attach a GUI-hosted QAx Kiwoom control.
@@ -52,6 +55,11 @@ class KiwoomClient:
         """
 
         self.openapi = openapi
+        # 최신 잔고/보유 현황을 내부에 캐싱해 GUI와 엔진이 동일 데이터를 사용하도록 한다.
+        if hasattr(openapi, "balance_received"):
+            openapi.balance_received.connect(self._on_balance_signal)  # type: ignore[arg-type]
+        if hasattr(openapi, "holdings_received"):
+            openapi.holdings_received.connect(self._on_holdings_signal)  # type: ignore[arg-type]
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.
@@ -113,11 +121,20 @@ class KiwoomClient:
         of crashing.
         """
 
+        if self._real_cash:
+            return self._real_cash
         try:
             return self._fetch_balance_from_kiwoom_api()
         except Exception as exc:  # pragma: no cover - defensive against API errors
             logger.exception("Failed to fetch real balance: %s", exc)
             return 0
+
+    def _on_balance_signal(self, cash: int, orderable: int) -> None:
+        self._real_cash = int(cash)
+        self._real_orderable = int(orderable)
+
+    def _on_holdings_signal(self, holdings: list) -> None:
+        self._real_holdings = holdings
 
     def _fetch_balance_from_kiwoom_api(self) -> int:
         """Placeholder for the real Kiwoom balance API call.
@@ -149,7 +166,8 @@ class KiwoomClient:
         """Return (index, name) tuples for Kiwoom 0150 conditions.
 
         OpenAPI 사용 가능 시 :class:`KiwoomOpenAPI` 에서 파싱된 조건식을 그대로
-        반환하고, 사용 불가 환경에서는 더미 조건식을 돌려줍니다.
+        반환하고, 사용 불가 환경에서는 **빈 리스트**를 반환하여 가짜
+        조건식으로 매매하지 않도록 합니다.
         """
 
         self.use_openapi = bool(
@@ -163,12 +181,7 @@ class KiwoomClient:
             except Exception as exc:  # pragma: no cover - optional path
                 logger.exception("OpenAPI condition list failed: %s", exc)
 
-        dummy_conditions: List[Tuple[int, str]] = [
-            (0, "단기급등_체크"),
-            (1, "돌파_추세"),
-            (2, "장중급락_반등"),
-        ]
-        return dummy_conditions
+        return []
 
     def get_condition_universe(self, condition_name: str) -> List[str]:
         """Return symbols matching the given condition name."""
@@ -186,7 +199,8 @@ class KiwoomClient:
             except Exception as exc:  # pragma: no cover - optional path
                 logger.exception("OpenAPI condition universe failed: %s", exc)
 
-        return ["005930", "000660", "035420", "068270", "035720"]
+        # 조건검색 결과가 없으면 빈 리스트를 반환해 매매가 발생하지 않도록 한다.
+        return []
 
     def openapi_login_and_load_conditions(self) -> None:
         """Perform OpenAPI login and condition load sequence for the GUI."""

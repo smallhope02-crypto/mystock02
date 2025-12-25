@@ -20,6 +20,8 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QListWidget,
+        QListWidgetItem,
         QMainWindow,
         QMessageBox,
         QPushButton,
@@ -40,6 +42,7 @@ if sys.version_info < (3, 8):  # pragma: no cover - defensive guard for old inst
     raise SystemExit("Python 3.8+ is required to run the GUI. Please upgrade your interpreter.")
 
 from .config import AppConfig, load_config
+from .condition_manager import ConditionManager
 from .kiwoom_client import KiwoomClient
 from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
 from .selector import UniverseSelector
@@ -223,11 +226,13 @@ class MainWindow(QMainWindow):
             kiwoom_client=self.kiwoom_client,
         )
         self.condition_map = {}
+        self.condition_manager = ConditionManager()
         self.condition_universe: set[str] = set()
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
         self._name_cache: dict[str, str] = {}
+        self._price_cache: dict[str, float] = {}
         self._last_price_refresh_reason: str = ""
         self._saved_mode: str = "paper"
         self.real_holdings: list[dict] = []
@@ -335,28 +340,19 @@ class MainWindow(QMainWindow):
         # Condition selector
         cond_group = QGroupBox("조건식 선택")
         cond_layout = QHBoxLayout()
-        self.condition_combo = QComboBox()
-        self.condition_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.condition_combo.setMinimumWidth(600)
-        print(
-            f"[DEBUG] condition_combo initial maxCount={self.condition_combo.maxCount()} count={self.condition_combo.count()}"
-        )
-        try:
-            # 넓은 드롭다운으로 긴 조건명을 확인할 수 있게 확장
-            self.condition_combo.view().setMinimumWidth(700)
-        except Exception:
-            # 일부 플랫폼에서는 view() 접근이 실패할 수 있으므로 무시
-            pass
-        self.condition_combo.currentTextChanged.connect(self._update_condition_tooltip)
-        self.condition_combo.setToolTip("")
+        self.condition_list = QListWidget()
+        self.condition_list.setSelectionMode(QListWidget.MultiSelection)
+        self.condition_list.setMinimumWidth(500)
+        self.condition_logic = QComboBox()
+        self.condition_logic.addItems(["OR", "AND"])
+        self.condition_logic.setToolTip("여러 조건식을 결합할 때 사용할 로직을 선택합니다.")
         self.all_conditions: list[tuple[int, str]] = []
-        self.manual_condition = QLineEdit()
-        self.manual_condition.setPlaceholderText("직접 입력 (선택 사항)")
         self.refresh_conditions_btn = QPushButton("조건 새로고침")
         self.run_condition_btn = QPushButton("조건 실행(실시간 포함)")
         cond_layout.addWidget(QLabel("조건식"))
-        cond_layout.addWidget(self.condition_combo)
-        cond_layout.addWidget(self.manual_condition)
+        cond_layout.addWidget(self.condition_list)
+        cond_layout.addWidget(QLabel("AND/OR"))
+        cond_layout.addWidget(self.condition_logic)
         cond_layout.addWidget(self.refresh_conditions_btn)
         cond_layout.addWidget(self.run_condition_btn)
         cond_group.setLayout(cond_layout)
@@ -464,6 +460,7 @@ class MainWindow(QMainWindow):
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
+        self.condition_logic.currentTextChanged.connect(lambda _text: self._recompute_universe())
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
@@ -503,6 +500,10 @@ class MainWindow(QMainWindow):
             self.openapi_widget.tr_condition_received.connect(self._on_tr_condition_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "real_condition_received"):
             self.openapi_widget.real_condition_received.connect(self._on_real_condition_received)
+        if self.openapi_widget:
+            real_data_sig = getattr(self.openapi_widget, "real_data_received", None)
+            if real_data_sig is not None and hasattr(real_data_sig, "connect"):
+                real_data_sig.connect(self._on_real_data_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "accounts_received"):
             self.openapi_widget.accounts_received.connect(self._on_accounts_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "balance_received"):
@@ -687,32 +688,39 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str, str, int, str)
     def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
+        if condition_name not in self.condition_manager.condition_sets:
+            self._log(f"[조건] 무시: 활성 조건 목록에 없는 {condition_name}")
+            return
         codes = [code for code in str(code_list).split(";") if code]
-        self.condition_universe = set(codes)
-        preview = ", ".join(codes[:10]) + (" ..." if len(codes) > 10 else "")
+        self.condition_manager.update_condition(condition_name, codes)
         self._log(
-            f"[조건] 초기 조회 결과 수신({condition_name}/{index}) - {len(codes)}건: {preview}"
+            f"[조건] 초기 조회 결과 수신({condition_name}/{index}) - {len(codes)}건"
         )
-        self.engine.set_external_universe(list(self.condition_universe))
-        self._log(f"[유니버스] external_universe set: {len(self.condition_universe)}개")
+        self._recompute_universe()
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
-        if event == "I":
-            self.condition_universe.add(code)
-            self.engine.add_universe_symbol(code)
-            action = "편입"
-            self._log(f"[유니버스] external_universe update: +{code} (size={len(self.condition_universe)})")
-        elif event == "D":
-            self.condition_universe.discard(code)
-            self.engine.remove_universe_symbol(code)
-            action = "편출"
-            self._log(f"[유니버스] external_universe update: -{code} (size={len(self.condition_universe)})")
-        else:
-            action = f"기타({event})"
+        if condition_name not in self.condition_manager.condition_sets:
+            return
+        self.condition_manager.apply_event(condition_name, code, event)
+        action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
         self._log(
-            f"[조건] 실시간 {action} 이벤트 - {code} (조건 {condition_name}/{condition_index}), 총 {len(self.condition_universe)}건"
+            f"[조건-실시간] {action}: {code} (조건 {condition_name}/{condition_index})"
         )
+        self._recompute_universe()
+
+    def _recompute_universe(self) -> None:
+        logic = self.condition_logic.currentText() or "OR"
+        counts = self.condition_manager.counts()
+        combined = set(self.condition_manager.combined(logic))
+        self.condition_universe = combined
+        self.engine.set_external_universe(list(combined))
+        self._log(
+            f"[COND] selected: {self.condition_manager.active_conditions} logic={logic} counts={counts} combined={len(combined)}"
+        )
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if openapi:
+            openapi.set_real_reg(list(combined))
 
     @pyqtSlot(list)
     def _on_accounts_received(self, accounts: list) -> None:
@@ -744,6 +752,13 @@ class MainWindow(QMainWindow):
         self._log(f"[실거래] 보유종목 수신: {len(holdings)}건")
         self._refresh_positions(market_open=self._is_market_open())
 
+    @pyqtSlot(str, dict)
+    def _on_real_data_received(self, code: str, payload: dict) -> None:
+        price = float(payload.get("price", 0) or 0)
+        if price:
+            self._price_cache[code] = price
+        self._refresh_positions(market_open=self._is_market_open())
+
     @pyqtSlot(str)
     def _on_server_gubun_changed(self, raw: str) -> None:
         self._update_server_label(raw)
@@ -769,37 +784,15 @@ class MainWindow(QMainWindow):
         else:
             self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음")
 
-    def _selected_condition(self) -> str:
-        combo_value = self.condition_combo.currentText().strip()
-        if combo_value:
-            mapped = self.condition_map.get(combo_value)
-            if mapped:
-                return mapped[1]
-            if ":" in combo_value:
-                _, name = combo_value.split(":", 1)
-                return name.strip()
-            return combo_value
-        manual = self.manual_condition.text().strip()
-        if manual:
-            return manual
-        return ""
-
-    def _selected_condition_tuple(self) -> Optional[tuple[int, str]]:
-        """Return (index, name) of the currently selected condition if available."""
-
-        combo_value = self.condition_combo.currentText().strip()
-        if combo_value and combo_value in self.condition_map:
-            return self.condition_map[combo_value]
-        if combo_value and ":" in combo_value:
-            idx_str, name = combo_value.split(":", 1)
-            try:
-                return int(idx_str.strip()), name.strip()
-            except ValueError:
-                return None
-        manual = self.manual_condition.text().strip()
-        if manual:
-            return None
-        return None
+    def _selected_conditions(self) -> list[tuple[int, str]]:
+        selections: list[tuple[int, str]] = []
+        for i in range(self.condition_list.count()):
+            item = self.condition_list.item(i)
+            if item.checkState() == Qt.Checked:
+                data = item.data(Qt.UserRole)
+                if data:
+                    selections.append(data)
+        return selections
 
     def _execute_condition(self) -> None:
         """Run the selected condition via OpenAPI (조회 + 실시간 등록)."""
@@ -816,19 +809,23 @@ class MainWindow(QMainWindow):
             openapi.load_conditions()
             return
 
-        selected = self._selected_condition_tuple()
-        if not selected:
-            self._log("실행할 조건식을 선택하거나 입력해 주세요.")
+        selections = self._selected_conditions()
+        if not selections:
+            self._log("실행할 조건식을 하나 이상 선택해 주세요.")
             return
 
-        idx, name = selected
         self.condition_universe.clear()
         self.engine.set_external_universe([])
-        self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
-        try:
-            openapi.send_condition(openapi.screen_no, name, idx, 1)
-        except Exception as exc:  # pragma: no cover - runtime dependent
-            self._log(f"조건 실행 실패: {exc}")
+        self.condition_manager.reset([name for _, name in selections])
+        logic = self.condition_logic.currentText() or "OR"
+        for idx, name in selections:
+            self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
+            try:
+                screen_no = f"{openapi.screen_no}{idx}"
+                openapi.send_condition(screen_no, name, idx, 1)
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                self._log(f"조건 실행 실패({name}): {exc}")
+        self._log(f"[COND] selected: {[n for _, n in selections]} logic={logic}")
 
     def on_apply_strategy(self) -> None:
         params = dict(
@@ -872,15 +869,20 @@ class MainWindow(QMainWindow):
 
         self.engine.set_external_universe(list(self.condition_universe))
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        condition = self._selected_condition() or "default"
-        self.engine.run_once(condition)
+        self.engine.run_once("combined")
         self._refresh_account()
         self._refresh_positions(market_open=self._is_market_open())
         self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
 
     def on_auto_start(self) -> None:
         if not self.auto_timer.isActive():
-            self._log(f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode}")
+            server_info = "-"
+            openapi = getattr(self.kiwoom_client, "openapi", None)
+            if openapi:
+                server_info = openapi.get_server_gubun_raw()
+            self._log(
+                f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode} server_gubun={server_info}"
+            )
             if self.enforce_market_hours and not self._is_market_open():
                 now = datetime.datetime.now()
                 self._log(
@@ -914,13 +916,15 @@ class MainWindow(QMainWindow):
             return
         self.engine.set_external_universe(list(self.condition_universe))
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        condition = self._selected_condition() or "default"
-        self.engine.run_once(condition)
+        self.engine.run_once("combined")
         self._refresh_account()
         self._refresh_positions(market_open=self._is_market_open())
 
     def _is_market_open(self) -> bool:
-        now_time = datetime.datetime.now().time()
+        now = datetime.datetime.now()
+        if now.weekday() >= 5:  # 주말
+            return False
+        now_time = now.time()
         return self.market_start <= now_time <= self.market_end
 
     def _on_eod_check(self) -> None:
@@ -1030,6 +1034,9 @@ class MainWindow(QMainWindow):
         price_refresh_reason = ""
 
         if use_real_holdings:
+            openapi = getattr(self.kiwoom_client, "openapi", None)
+            if openapi:
+                openapi.set_real_reg([h.get("code", "") for h in self.real_holdings if h.get("code")])
             for row, h in enumerate(self.real_holdings):
                 code = h.get("code", "").strip()
                 name = h.get("name", "") or self._get_symbol_name(code)
@@ -1053,7 +1060,9 @@ class MainWindow(QMainWindow):
                     price_refresh_reason = "[시세] 장전이라 시세 갱신을 건너뜁니다."
                 else:
                     try:
-                        current_price = self.engine.get_current_price(pos.symbol)
+                        current_price = self._price_cache.get(pos.symbol) or self.engine.get_current_price(
+                            pos.symbol
+                        )
                         if current_price and pos.entry_price:
                             change_pct = (current_price - pos.entry_price) / pos.entry_price * 100
                             change_text = f"{current_price:.2f} / {change_pct:.2f}%"
@@ -1077,44 +1086,21 @@ class MainWindow(QMainWindow):
 
         self.positions_table.resizeColumnsToContents()
 
-    def _update_condition_tooltip(self, text: str) -> None:
-        """조건식 콤보박스 툴팁을 현재 선택된 항목으로 갱신한다."""
-
-        if not text:
-            self.condition_combo.setToolTip("")
-        else:
-            self.condition_combo.setToolTip(text)
-
     def _refresh_condition_list(self) -> None:
-        previous = self.condition_combo.currentText()
-        existing_count = self.condition_combo.count()
         openapi = getattr(self.kiwoom_client, "openapi", None)
-
-        if not openapi:
-            self.condition_combo.clear()
+        if not openapi or not openapi.is_enabled():
+            self.condition_list.clear()
             self.condition_map.clear()
-            self.condition_combo.addItem("(조건식 기능 비활성)")
-            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 래퍼 미생성)")
-            return
-        if not openapi.is_enabled():
-            self.condition_combo.clear()
-            self.condition_map.clear()
-            self.condition_combo.addItem("(조건식 기능 비활성)")
-            self._log(
-                "조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)"
-            )
-            print("[GUI] OpenAPI debug_status during refresh:", openapi.debug_status(), flush=True)
+            self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 비활성)")
             return
         if not openapi.connected:
-            self.condition_combo.clear()
+            self.condition_list.clear()
             self.condition_map.clear()
-            self.condition_combo.addItem("(로그인 필요)")
             self._log("OpenAPI 로그인 후 조건식을 사용할 수 있습니다.")
             return
         if not openapi.conditions_loaded:
-            self.condition_combo.clear()
+            self.condition_list.clear()
             self.condition_map.clear()
-            self.condition_combo.addItem("(조건 로딩 중)")
             openapi.load_conditions()
             self._log("조건식 정보를 불러오는 중입니다...")
             return
@@ -1128,47 +1114,17 @@ class MainWindow(QMainWindow):
         raw_count = len(conditions)
         preview_head = ", ".join([f"{c[0]}:{c[1]}" for c in conditions[:3]])
         preview_tail = ", ".join([f"{c[0]}:{c[1]}" for c in conditions[-3:]]) if raw_count > 3 else ""
-        if preview_tail and preview_head != preview_tail:
-            self._log(
-                f"[조건] 로딩 결과: 총 {raw_count}개, 앞부분 [{preview_head}], 끝부분 [{preview_tail}]"
-            )
-        else:
-            self._log(f"[조건] 로딩 결과: 총 {raw_count}개")
+        self._log(f"[COND] loaded {raw_count} conditions head=[{preview_head}] tail=[{preview_tail}]")
 
-        if existing_count and raw_count < existing_count:
-            print(
-                f"[GUI] IGNORE shorter conditions update raw_count={raw_count} existing_count={existing_count}"
-            )
-            self._log(
-                f"[조건] 조건식 개수가 줄어든 응답(raw={raw_count})은 무시하고 기존 {existing_count}개를 유지합니다."
-            )
-            return
-
-        self.all_conditions = [(int(idx), name) for idx, name in conditions]
-
-        self.condition_combo.clear()
+        self.condition_list.clear()
         self.condition_map.clear()
-
-        if self.all_conditions:
-            labels = [f"{idx}: {name}" for idx, name in self.all_conditions]
-            _debug_combo_population(self.condition_combo, labels, label="condition_combo")
-            for idx, name in self.all_conditions:
-                label = f"{idx}: {name}"
-                self.condition_map[label] = (idx, name)
-            if previous in self.condition_map:
-                self.condition_combo.setCurrentText(previous)
-            combo_count = self.condition_combo.count()
-            if combo_count != raw_count:
-                self._log(
-                    f"[조건][경고] 콤보 항목 수({combo_count})와 로딩 수({raw_count}) 불일치"
-                )
-            else:
-                self._log(f"조건식 목록 {combo_count}개 로딩 완료")
-        else:
-            self.condition_combo.addItem("(조건 없음)")
-            self._log("계정에 등록된 조건식이 없습니다. (0150에서 확인해 주세요)")
-
-        self._update_condition_tooltip(self.condition_combo.currentText())
+        self.all_conditions = [(int(idx), name) for idx, name in conditions]
+        for idx, name in self.all_conditions:
+            item = QListWidgetItem(f"{idx}: {name}")
+            item.setData(Qt.UserRole, (idx, name))
+            item.setCheckState(Qt.Unchecked)
+            self.condition_list.addItem(item)
+            self.condition_map[name] = (idx, name)
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

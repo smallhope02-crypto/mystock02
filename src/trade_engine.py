@@ -49,6 +49,14 @@ class TradeEngine:
     def _active_price_lookup(self, symbol: str) -> float:
         if self.broker_mode == "real":
             return self.kiwoom_client.get_current_price(symbol)
+        # paper 모드에서도 가능한 경우 실시간 캐시를 우선 사용한다.
+        price = 0.0
+        try:
+            price = self.kiwoom_client.get_current_price(symbol)
+        except Exception:
+            price = 0.0
+        if price:
+            return price
         return self.paper_broker.get_current_price(symbol)
 
     def run_once(self, condition_name: str) -> None:

@@ -44,6 +44,8 @@ class _DisabledOpenAPI:
         self._init_error = _QAX_IMPORT_ERROR
         self._control = None
         self.ax = None
+        self.last_prices: dict[str, float] = {}
+        self.real_data_received = None
         if _QAX_IMPORT_ERROR:
             print(f"[OpenAPI] QAx unavailable: {_QAX_IMPORT_ERROR}")
         self.accounts = []
@@ -110,6 +112,12 @@ class _DisabledOpenAPI:
     def get_server_gubun_raw(self) -> str:
         return ""
 
+    def set_real_reg(self, codes: List[str], fids: str = "10;11;12", screen_no: str = "9999") -> None:
+        return None
+
+    def get_last_price(self, code: str) -> float:
+        return float(self.last_prices.get(code, 0))
+
 
 if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore
@@ -127,6 +135,7 @@ else:
         condition_ver_received = QtCore.pyqtSignal(int, str)
         tr_condition_received = QtCore.pyqtSignal(str, str, str, int, str)
         real_condition_received = QtCore.pyqtSignal(str, str, str, str)
+        real_data_received = QtCore.pyqtSignal(str, dict)
         accounts_received = QtCore.pyqtSignal(list)
         balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
         holdings_received = QtCore.pyqtSignal(list)  # list of dicts
@@ -151,6 +160,7 @@ else:
             self._condition_load_requested: bool = False
             self.accounts: List[str] = []
             self.server_gubun: str = ""
+            self.last_prices: dict[str, float] = {}
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -202,6 +212,7 @@ else:
                 "OnReceiveTrCondition": self._on_receive_tr_condition,
                 "OnReceiveRealCondition": self._on_receive_real_condition,
                 "OnReceiveTrData": self._on_receive_tr_data,
+                "OnReceiveRealData": self._on_receive_real_data,
             }
 
             for name, handler in bindings.items():
@@ -438,6 +449,29 @@ else:
             )
             self.real_condition_received.emit(str(code), str(event), str(condition_name), str(condition_index))
 
+        def _on_receive_real_data(self, code: str, real_type: str, _data: str) -> None:
+            """Handle real-time price updates and broadcast a simplified payload."""
+
+            if not self.ax:
+                return
+            try:
+                price = float(str(self.ax.dynamicCall("GetCommRealData(QString,int)", code, 10)).strip() or 0)
+                change = float(str(self.ax.dynamicCall("GetCommRealData(QString,int)", code, 11)).strip() or 0)
+                change_rate_raw = str(self.ax.dynamicCall("GetCommRealData(QString,int)", code, 12)).strip()
+                change_rate = float(change_rate_raw) if change_rate_raw else 0.0
+                payload = {
+                    "code": code,
+                    "type": real_type,
+                    "price": price,
+                    "change": change,
+                    "change_rate": change_rate,
+                }
+                if price:
+                    self.last_prices[code] = price
+                self.real_data_received.emit(code, payload)
+            except Exception as exc:
+                print(f"[OpenAPI] Failed to parse real data for {code}: {exc}")
+
         # -- Accounts / balances ----------------------------------------
         def request_account_list(self) -> None:
             if not self.is_enabled():
@@ -484,6 +518,22 @@ else:
             decision = raw == "1"
             print(f"[DEBUG] server_decision={'SIMULATION' if decision else 'REAL_OR_UNKNOWN'} raw={raw!r}")
             return decision
+
+        # -- Real-time price helpers -----------------------------------
+        def set_real_reg(self, codes: List[str], fids: str = "10;11;12", screen_no: str = "9999") -> None:
+            """Register real-time feeds for the given codes."""
+
+            if not self.ax or not codes:
+                return
+            try:
+                joined = ";".join(codes)
+                self.ax.dynamicCall("SetRealReg(QString, QString, QString, QString)", screen_no, joined, fids, "0")
+                print(f"[OpenAPI] SetRealReg screen={screen_no} codes={joined} fids={fids}")
+            except Exception as exc:
+                print(f"[OpenAPI] SetRealReg 실패: {exc}")
+
+        def get_last_price(self, code: str) -> float:
+            return float(self.last_prices.get(code, 0))
 
         def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
             """Request deposit (opw00001) and holdings (opw00018)."""

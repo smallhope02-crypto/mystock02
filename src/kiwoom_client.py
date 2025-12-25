@@ -45,6 +45,7 @@ class KiwoomClient:
         self._real_cash: int = 0
         self._real_orderable: int = 0
         self._real_holdings: list = []
+        self._last_prices: Dict[str, float] = {}
 
     def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
         """Attach a GUI-hosted QAx Kiwoom control.
@@ -60,6 +61,8 @@ class KiwoomClient:
             openapi.balance_received.connect(self._on_balance_signal)  # type: ignore[arg-type]
         if hasattr(openapi, "holdings_received"):
             openapi.holdings_received.connect(self._on_holdings_signal)  # type: ignore[arg-type]
+        if hasattr(openapi, "real_data_received"):
+            openapi.real_data_received.connect(self._on_real_data)  # type: ignore[arg-type]
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.
@@ -135,6 +138,11 @@ class KiwoomClient:
 
     def _on_holdings_signal(self, holdings: list) -> None:
         self._real_holdings = holdings
+
+    def _on_real_data(self, code: str, payload: dict) -> None:
+        price = float(payload.get("price", 0) or 0)
+        if price:
+            self._last_prices[code] = price
 
     def _fetch_balance_from_kiwoom_api(self) -> int:
         """Placeholder for the real Kiwoom balance API call.
@@ -228,9 +236,19 @@ class KiwoomClient:
 
     def get_current_price(self, symbol: str) -> float:
         """Return a dummy current price for a symbol."""
+        if self.openapi:
+            cached = getattr(self.openapi, "get_last_price", lambda _c: 0)(symbol)
+            if cached:
+                return cached
+        cached_client = self._last_prices.get(symbol)
+        if cached_client:
+            return cached_client
         # TODO: 실제 API 연동 시 구현
         base = hash(symbol) % 100_000 / 100 + 10
         return round(base, 2)
+
+    def get_last_price(self, symbol: str) -> float:
+        return float(self._last_prices.get(symbol) or 0)
 
     def get_account_summary(self) -> Dict[str, float]:
         """Return placeholder account summary.

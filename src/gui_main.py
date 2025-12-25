@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         )
         self.condition_map = {}
         self.condition_manager = ConditionManager()
+        self.condition_groups: list[dict[str, list[str]]] = []
         self.condition_universe: set[str] = set()
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
@@ -337,24 +338,56 @@ class MainWindow(QMainWindow):
         conn_group.setLayout(conn_layout)
         main.addWidget(conn_group)
 
-        # Condition selector
-        cond_group = QGroupBox("조건식 선택")
+        # Condition selector + group builder (group=OR, between groups=AND)
+        cond_group = QGroupBox("조건식 선택 / 그룹 빌더")
         cond_layout = QHBoxLayout()
+
         self.condition_list = QListWidget()
         self.condition_list.setSelectionMode(QListWidget.MultiSelection)
-        self.condition_list.setMinimumWidth(500)
-        self.condition_logic = QComboBox()
-        self.condition_logic.addItems(["OR", "AND"])
-        self.condition_logic.setToolTip("여러 조건식을 결합할 때 사용할 로직을 선택합니다.")
+        self.condition_list.setMinimumWidth(400)
         self.all_conditions: list[tuple[int, str]] = []
         self.refresh_conditions_btn = QPushButton("조건 새로고침")
         self.run_condition_btn = QPushButton("조건 실행(실시간 포함)")
-        cond_layout.addWidget(QLabel("조건식"))
-        cond_layout.addWidget(self.condition_list)
-        cond_layout.addWidget(QLabel("AND/OR"))
-        cond_layout.addWidget(self.condition_logic)
-        cond_layout.addWidget(self.refresh_conditions_btn)
-        cond_layout.addWidget(self.run_condition_btn)
+        self.preview_candidates_btn = QPushButton("후보 보기")
+
+        left_panel = QVBoxLayout()
+        left_panel.addWidget(QLabel("조건식 목록"))
+        left_panel.addWidget(self.condition_list)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.refresh_conditions_btn)
+        btn_row.addWidget(self.run_condition_btn)
+        btn_row.addWidget(self.preview_candidates_btn)
+        left_panel.addLayout(btn_row)
+
+        # Group builder
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel("조건 그룹(내부 OR) / 그룹 간 AND"))
+        self.group_list = QListWidget()
+        self.group_list.setSelectionMode(QListWidget.SingleSelection)
+        self.group_detail = QListWidget()
+        self.group_detail.setSelectionMode(QListWidget.MultiSelection)
+        self.group_preview_label = QLabel("(그룹 미구성)")
+        self.group_preview_label.setStyleSheet("color: blue;")
+
+        group_btn_row = QHBoxLayout()
+        self.add_group_btn = QPushButton("그룹 추가")
+        self.add_to_group_btn = QPushButton("선택 조건 → 그룹")
+        self.remove_from_group_btn = QPushButton("그룹에서 제거")
+        self.delete_group_btn = QPushButton("그룹 삭제")
+        group_btn_row.addWidget(self.add_group_btn)
+        group_btn_row.addWidget(self.add_to_group_btn)
+        group_btn_row.addWidget(self.remove_from_group_btn)
+        group_btn_row.addWidget(self.delete_group_btn)
+
+        right_panel.addWidget(self.group_list)
+        right_panel.addWidget(QLabel("선택 그룹 구성"))
+        right_panel.addWidget(self.group_detail)
+        right_panel.addLayout(group_btn_row)
+        right_panel.addWidget(QLabel("조합 미리보기 (그룹 간 AND)"))
+        right_panel.addWidget(self.group_preview_label)
+
+        cond_layout.addLayout(left_panel)
+        cond_layout.addLayout(right_panel)
         cond_group.setLayout(cond_layout)
         main.addWidget(cond_group)
 
@@ -460,7 +493,12 @@ class MainWindow(QMainWindow):
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
-        self.condition_logic.currentTextChanged.connect(lambda _text: self._recompute_universe())
+        self.preview_candidates_btn.clicked.connect(self._preview_candidates)
+        self.add_group_btn.clicked.connect(self._add_group)
+        self.add_to_group_btn.clicked.connect(self._add_selected_to_group)
+        self.remove_from_group_btn.clicked.connect(self._remove_from_group)
+        self.delete_group_btn.clicked.connect(self._delete_group)
+        self.group_list.currentRowChanged.connect(lambda _row: self._refresh_group_detail())
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
@@ -710,17 +748,19 @@ class MainWindow(QMainWindow):
         self._recompute_universe()
 
     def _recompute_universe(self) -> None:
-        logic = self.condition_logic.currentText() or "OR"
+        final_set, group_sets = self.condition_manager.evaluate()
         counts = self.condition_manager.counts()
-        combined = set(self.condition_manager.combined(logic))
-        self.condition_universe = combined
-        self.engine.set_external_universe(list(combined))
+        group_sizes = [len(s) for s in group_sets]
+        self.condition_universe = set(final_set)
+        self.engine.set_external_universe(list(final_set))
+        self._log(f"[GROUP] groups configured: {self._group_preview_text()}")
+        self._log("[GROUP] evaluation rule: within-group=OR, between-groups=AND")
         self._log(
-            f"[COND] selected: {self.condition_manager.active_conditions} logic={logic} counts={counts} combined={len(combined)}"
+            f"[GROUP] set sizes: cond={counts} groups={group_sizes} final candidates={len(final_set)}"
         )
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
-            openapi.set_real_reg(list(combined))
+            openapi.set_real_reg(list(final_set))
 
     @pyqtSlot(list)
     def _on_accounts_received(self, accounts: list) -> None:
@@ -794,6 +834,131 @@ class MainWindow(QMainWindow):
                     selections.append(data)
         return selections
 
+    def _selected_condition_names(self) -> list[str]:
+        return [name for _idx, name in self._selected_conditions()]
+
+    # Condition group helpers -----------------------------------------
+    def _group_preview_text(self) -> str:
+        if not self.condition_groups:
+            return "(그룹 없음)"
+        parts: list[str] = []
+        for g in self.condition_groups:
+            conds = g.get("conditions", [])
+            inner = " OR ".join(conds) if conds else "(empty)"
+            parts.append(f"({g.get('name', 'Group')} : {inner})")
+        return " AND ".join(parts)
+
+    def _refresh_group_list(self) -> None:
+        self.group_list.blockSignals(True)
+        current = self.group_list.currentRow()
+        self.group_list.clear()
+        for g in self.condition_groups:
+            conds = g.get("conditions", [])
+            summary = ", ".join(conds) if conds else "(empty)"
+            item = QListWidgetItem(f"{g.get('name', 'Group')}: {summary}")
+            self.group_list.addItem(item)
+        if 0 <= current < self.group_list.count():
+            self.group_list.setCurrentRow(current)
+        elif self.group_list.count():
+            self.group_list.setCurrentRow(0)
+        self.group_list.blockSignals(False)
+        self._refresh_group_detail()
+        self._update_group_preview()
+
+    def _refresh_group_detail(self) -> None:
+        idx = self.group_list.currentRow()
+        self.group_detail.clear()
+        if idx < 0 or idx >= len(self.condition_groups):
+            return
+        for name in self.condition_groups[idx].get("conditions", []):
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, name)
+            self.group_detail.addItem(item)
+
+    def _update_group_preview(self) -> None:
+        self.group_preview_label.setText(self._group_preview_text())
+
+    def _add_group(self) -> None:
+        selections = self._selected_condition_names()
+        if not selections:
+            self._log("[GROUP] 그룹을 만들 조건식을 먼저 선택하세요.")
+            return
+        group_name = f"Group {len(self.condition_groups) + 1}"
+        self.condition_groups.append({"name": group_name, "conditions": selections})
+        self._log(f"[GROUP] 그룹 추가: {group_name} ← {selections}")
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.reset_sets()
+        self._refresh_group_list()
+
+    def _add_selected_to_group(self) -> None:
+        idx = self.group_list.currentRow()
+        if idx < 0 or idx >= len(self.condition_groups):
+            self._log("[GROUP] 먼저 추가할 그룹을 선택하세요.")
+            return
+        selections = self._selected_condition_names()
+        if not selections:
+            self._log("[GROUP] 그룹에 넣을 조건식을 선택하세요.")
+            return
+        target = self.condition_groups[idx]
+        added = []
+        for name in selections:
+            if name not in target["conditions"]:
+                target["conditions"].append(name)
+                added.append(name)
+            else:
+                self._log(f"[GROUP] {target['name']}에 이미 존재: {name}")
+        if added:
+            self._log(f"[GROUP] {target['name']}에 조건 추가: {added}")
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.reset_sets()
+        self._refresh_group_list()
+
+    def _remove_from_group(self) -> None:
+        idx = self.group_list.currentRow()
+        if idx < 0 or idx >= len(self.condition_groups):
+            self._log("[GROUP] 제거할 그룹을 선택하세요.")
+            return
+        selected = [self.group_detail.item(i).data(Qt.UserRole) for i in range(self.group_detail.count()) if self.group_detail.item(i).isSelected()]
+        if not selected:
+            self._log("[GROUP] 그룹에서 제거할 조건을 선택하세요.")
+            return
+        before = len(self.condition_groups[idx]["conditions"])
+        self.condition_groups[idx]["conditions"] = [c for c in self.condition_groups[idx]["conditions"] if c not in selected]
+        after = len(self.condition_groups[idx]["conditions"])
+        self._log(f"[GROUP] {self.condition_groups[idx]['name']}에서 {before - after}개 제거: {selected}")
+        if not self.condition_groups[idx]["conditions"]:
+            self._log("[GROUP] 그룹이 비었습니다. 실행 전에 채워주세요.")
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.reset_sets()
+        self._refresh_group_list()
+
+    def _delete_group(self) -> None:
+        idx = self.group_list.currentRow()
+        if idx < 0 or idx >= len(self.condition_groups):
+            self._log("[GROUP] 삭제할 그룹을 선택하세요.")
+            return
+        removed = self.condition_groups.pop(idx)
+        self._log(f"[GROUP] 그룹 삭제: {removed.get('name', '')}")
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.reset_sets()
+        self._refresh_group_list()
+
+    def _preview_candidates(self) -> None:
+        if not self.condition_groups:
+            self._log("[GROUP] 그룹이 없습니다. 그룹을 먼저 구성하세요.")
+            return
+        missing_group = [g for g in self.condition_groups if not g.get("conditions")]
+        if missing_group:
+            self._log("[GROUP] 비어있는 그룹이 있어 후보를 계산할 수 없습니다.")
+            return
+        final_set, group_sets = self.condition_manager.evaluate()
+        cond_counts = self.condition_manager.counts()
+        group_sizes = [len(s) for s in group_sets]
+        self._log(
+            f"[GROUP] evaluation rule: within-group=OR, between-groups=AND | cond_counts={cond_counts} | group_sizes={group_sizes} | final candidates={len(final_set)}"
+        )
+        self._update_group_preview()
+
     def _execute_condition(self) -> None:
         """Run the selected condition via OpenAPI (조회 + 실시간 등록)."""
 
@@ -809,23 +974,34 @@ class MainWindow(QMainWindow):
             openapi.load_conditions()
             return
 
-        selections = self._selected_conditions()
-        if not selections:
-            self._log("실행할 조건식을 하나 이상 선택해 주세요.")
+        if not self.condition_groups:
+            self._log("[GROUP] 그룹이 없습니다. 그룹을 먼저 구성하세요.")
+            return
+        if any(not g.get("conditions") for g in self.condition_groups):
+            self._log("[GROUP] 비어있는 그룹이 있어 조건을 실행할 수 없습니다.")
+            return
+
+        active_conditions = sorted({name for g in self.condition_groups for name in g.get("conditions", [])})
+        missing = [name for name in active_conditions if name not in self.condition_map]
+        if missing:
+            self._log(f"[GROUP] 조건식 정보가 존재하지 않습니다: {missing}")
             return
 
         self.condition_universe.clear()
         self.engine.set_external_universe([])
-        self.condition_manager.reset([name for _, name in selections])
-        logic = self.condition_logic.currentText() or "OR"
-        for idx, name in selections:
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.reset_sets()
+        for name in active_conditions:
+            idx, _ = self.condition_map[name]
             self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
             try:
                 screen_no = f"{openapi.screen_no}{idx}"
                 openapi.send_condition(screen_no, name, idx, 1)
             except Exception as exc:  # pragma: no cover - runtime dependent
                 self._log(f"조건 실행 실패({name}): {exc}")
-        self._log(f"[COND] selected: {[n for _, n in selections]} logic={logic}")
+
+        self._log(f"[GROUP] groups configured: {self._group_preview_text()}")
+        self._log("[GROUP] evaluation rule: within-group=OR, between-groups=AND")
 
     def on_apply_strategy(self) -> None:
         params = dict(
@@ -1125,6 +1301,18 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.Unchecked)
             self.condition_list.addItem(item)
             self.condition_map[name] = (idx, name)
+
+        valid_names = {name for _, name in self.all_conditions}
+        pruned = False
+        for g in self.condition_groups:
+            before = len(g["conditions"])
+            g["conditions"] = [c for c in g["conditions"] if c in valid_names]
+            if len(g["conditions"]) != before:
+                pruned = True
+        if pruned:
+            self._log("[GROUP] 일부 그룹 구성에 더 이상 존재하지 않는 조건식이 있어 제거했습니다.")
+        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self._refresh_group_list()
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

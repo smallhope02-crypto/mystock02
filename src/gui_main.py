@@ -3,7 +3,7 @@
 import datetime
 import logging
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 try:
     from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
@@ -227,7 +227,7 @@ class MainWindow(QMainWindow):
         )
         self.condition_map = {}
         self.condition_manager = ConditionManager()
-        self.condition_groups: list[dict[str, list[str]]] = []
+        self.builder_tokens: list[dict] = []
         self.condition_universe: set[str] = set()
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
         conn_group.setLayout(conn_layout)
         main.addWidget(conn_group)
 
-        # Condition selector + group builder (group=OR, between groups=AND)
+        # Condition selector + expression builder (group=OR buckets, between groups=AND)
         cond_group = QGroupBox("조건식 선택 / 그룹 빌더")
         cond_layout = QHBoxLayout()
 
@@ -359,31 +359,29 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.preview_candidates_btn)
         left_panel.addLayout(btn_row)
 
-        # Group builder
+        # Expression builder strip
         right_panel = QVBoxLayout()
-        right_panel.addWidget(QLabel("조건 그룹(내부 OR) / 그룹 간 AND"))
-        self.group_list = QListWidget()
-        self.group_list.setSelectionMode(QListWidget.SingleSelection)
-        self.group_detail = QListWidget()
-        self.group_detail.setSelectionMode(QListWidget.MultiSelection)
+        right_panel.addWidget(QLabel("조건 편집 스트립 (그룹=OR, 그룹 간 AND)"))
+        self.builder_strip = QListWidget()
+        self.builder_strip.setSelectionMode(QListWidget.ExtendedSelection)
+        self.builder_strip.setMinimumHeight(140)
+
+        builder_btn_row = QHBoxLayout()
+        self.add_selected_btn = QPushButton("선택 추가(AND 체인)")
+        self.wrap_btn = QPushButton("괄호로 감싸기")
+        self.validate_btn = QPushButton("문법 검증")
+        self.clear_builder_btn = QPushButton("초기화")
+        builder_btn_row.addWidget(self.add_selected_btn)
+        builder_btn_row.addWidget(self.wrap_btn)
+        builder_btn_row.addWidget(self.validate_btn)
+        builder_btn_row.addWidget(self.clear_builder_btn)
+
         self.group_preview_label = QLabel("(그룹 미구성)")
         self.group_preview_label.setStyleSheet("color: blue;")
 
-        group_btn_row = QHBoxLayout()
-        self.add_group_btn = QPushButton("그룹 추가")
-        self.add_to_group_btn = QPushButton("선택 조건 → 그룹")
-        self.remove_from_group_btn = QPushButton("그룹에서 제거")
-        self.delete_group_btn = QPushButton("그룹 삭제")
-        group_btn_row.addWidget(self.add_group_btn)
-        group_btn_row.addWidget(self.add_to_group_btn)
-        group_btn_row.addWidget(self.remove_from_group_btn)
-        group_btn_row.addWidget(self.delete_group_btn)
-
-        right_panel.addWidget(self.group_list)
-        right_panel.addWidget(QLabel("선택 그룹 구성"))
-        right_panel.addWidget(self.group_detail)
-        right_panel.addLayout(group_btn_row)
-        right_panel.addWidget(QLabel("조합 미리보기 (그룹 간 AND)"))
+        right_panel.addWidget(self.builder_strip)
+        right_panel.addLayout(builder_btn_row)
+        right_panel.addWidget(QLabel("조합 미리보기 (그룹=OR, 그룹 간 AND)"))
         right_panel.addWidget(self.group_preview_label)
 
         cond_layout.addLayout(left_panel)
@@ -494,11 +492,11 @@ class MainWindow(QMainWindow):
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.preview_candidates_btn.clicked.connect(self._preview_candidates)
-        self.add_group_btn.clicked.connect(self._add_group)
-        self.add_to_group_btn.clicked.connect(self._add_selected_to_group)
-        self.remove_from_group_btn.clicked.connect(self._remove_from_group)
-        self.delete_group_btn.clicked.connect(self._delete_group)
-        self.group_list.currentRowChanged.connect(lambda _row: self._refresh_group_detail())
+        self.add_selected_btn.clicked.connect(self._on_add_selected_conditions)
+        self.wrap_btn.clicked.connect(self._wrap_selection)
+        self.validate_btn.clicked.connect(self._validate_builder)
+        self.clear_builder_btn.clicked.connect(self._clear_builder)
+        self.builder_strip.itemDoubleClicked.connect(self._toggle_operator_token)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
@@ -837,118 +835,192 @@ class MainWindow(QMainWindow):
     def _selected_condition_names(self) -> list[str]:
         return [name for _idx, name in self._selected_conditions()]
 
-    # Condition group helpers -----------------------------------------
-    def _group_preview_text(self) -> str:
-        if not self.condition_groups:
-            return "(그룹 없음)"
-        parts: list[str] = []
-        for g in self.condition_groups:
-            conds = g.get("conditions", [])
-            inner = " OR ".join(conds) if conds else "(empty)"
-            parts.append(f"({g.get('name', 'Group')} : {inner})")
-        return " AND ".join(parts)
+    # Condition builder helpers --------------------------------------
+    def _builder_log_tokens(self) -> None:
+        pretty = " ".join(token.get("text", token.get("value", "")) for token in self.builder_tokens)
+        self._log(f"[BUILDER] tokens: {pretty if pretty else '(empty)'}")
 
-    def _refresh_group_list(self) -> None:
-        self.group_list.blockSignals(True)
-        current = self.group_list.currentRow()
-        self.group_list.clear()
-        for g in self.condition_groups:
-            conds = g.get("conditions", [])
-            summary = ", ".join(conds) if conds else "(empty)"
-            item = QListWidgetItem(f"{g.get('name', 'Group')}: {summary}")
-            self.group_list.addItem(item)
-        if 0 <= current < self.group_list.count():
-            self.group_list.setCurrentRow(current)
-        elif self.group_list.count():
-            self.group_list.setCurrentRow(0)
-        self.group_list.blockSignals(False)
-        self._refresh_group_detail()
+    def _refresh_builder_strip(self) -> None:
+        self.builder_strip.blockSignals(True)
+        self.builder_strip.clear()
+        for token in self.builder_tokens:
+            text = token.get("text") or token.get("value") or ""
+            item = QListWidgetItem(text)
+            if token["type"] == "OP":
+                item.setForeground(Qt.blue)
+            elif token["type"] in {"LPAREN", "RPAREN"}:
+                item.setForeground(Qt.darkGreen)
+            item.setData(Qt.UserRole, token)
+            self.builder_strip.addItem(item)
+        self.builder_strip.blockSignals(False)
         self._update_group_preview()
 
-    def _refresh_group_detail(self) -> None:
-        idx = self.group_list.currentRow()
-        self.group_detail.clear()
-        if idx < 0 or idx >= len(self.condition_groups):
+    def _clear_builder(self) -> None:
+        self.builder_tokens = []
+        self.condition_manager.set_groups([])
+        self.condition_manager.reset_sets()
+        self._refresh_builder_strip()
+        self._log("[BUILDER] cleared")
+
+    def _current_insert_index(self) -> int:
+        idx = self.builder_strip.currentRow()
+        return len(self.builder_tokens) if idx < 0 else idx
+
+    def _insert_with_auto_and(self, idx: int, new_tokens: List[dict]) -> None:
+        tokens = self.builder_tokens
+        if tokens and idx > 0:
+            prev = tokens[idx - 1]
+            if prev["type"] in {"COND", "RPAREN"}:
+                if idx == len(tokens) or tokens[idx]["type"] != "OP":
+                    tokens.insert(idx, {"type": "OP", "value": "AND", "text": "AND"})
+                    idx += 1
+        for token in new_tokens:
+            tokens.insert(idx, token)
+            idx += 1
+        self._refresh_builder_strip()
+        self._update_groups_from_tokens(reset_sets=True)
+
+    def _on_add_selected_conditions(self) -> None:
+        selections = self._selected_conditions()
+        if not selections:
+            self._log("[BUILDER] 추가할 조건식을 선택하세요.")
             return
-        for name in self.condition_groups[idx].get("conditions", []):
-            item = QListWidgetItem(name)
-            item.setData(Qt.UserRole, name)
-            self.group_detail.addItem(item)
+        # preserve display order in list
+        selected_nums = []
+        selected_names = []
+        for i in range(self.condition_list.count()):
+            item = self.condition_list.item(i)
+            if item.checkState() == Qt.Checked:
+                data = item.data(Qt.UserRole)
+                if data and data not in selections:
+                    # ensure same identity
+                    pass
+                if data:
+                    idx, name = data
+                    selected_nums.append(idx)
+                    selected_names.append(name)
+        if not selected_nums:
+            for idx, name in selections:
+                selected_nums.append(idx)
+                selected_names.append(name)
+
+        new_tokens: List[dict] = []
+        for i, name in enumerate(selected_names):
+            if i > 0:
+                new_tokens.append({"type": "OP", "value": "AND", "text": "AND"})
+            new_tokens.append({"type": "COND", "value": name, "text": name})
+
+        insert_at = self._current_insert_index()
+        join_txt = "AND"
+        self._log(f"[BUILDER] add_selected: nums={selected_nums} join={join_txt} insert_at={insert_at}")
+        self._insert_with_auto_and(insert_at, new_tokens)
+        self._builder_log_tokens()
+
+    def _toggle_operator_token(self, item: QListWidgetItem) -> None:
+        token = item.data(Qt.UserRole)
+        if not token or token.get("type") != "OP":
+            return
+        token["value"] = "OR" if token.get("value") == "AND" else "AND"
+        token["text"] = token["value"]
+        item.setText(token["text"])
+        self._log(f"[BUILDER] toggled operator: {token['value']}")
+        self._update_groups_from_tokens(reset_sets=False)
+        self._builder_log_tokens()
+
+    def _wrap_selection(self) -> None:
+        rows = sorted({i for i in range(self.builder_strip.count()) if self.builder_strip.item(i).isSelected()})
+        if not rows:
+            self._log("[BUILDER] 괄호로 감쌀 토큰을 선택하세요.")
+            return
+        start, end = rows[0], rows[-1]
+        self.builder_tokens.insert(start, {"type": "LPAREN", "value": "(", "text": "("})
+        self.builder_tokens.insert(end + 2, {"type": "RPAREN", "value": ")", "text": ")"})
+        self._log(f"[BUILDER] wrap tokens range {start}-{end}")
+        self._refresh_builder_strip()
+        self._update_groups_from_tokens(reset_sets=False)
+        self._builder_log_tokens()
+
+    def _validate_builder(self) -> bool:
+        tokens = self.builder_tokens
+        if not tokens:
+            self._log("[BUILDER] 토큰이 비어있습니다.")
+            return False
+        depth = 0
+        prev_type = None
+        for token in tokens:
+            ttype = token.get("type")
+            if ttype == "LPAREN":
+                depth += 1
+            elif ttype == "RPAREN":
+                depth -= 1
+                if depth < 0:
+                    self._log("[BUILDER] 닫는 괄호가 많습니다.")
+                    return False
+            elif ttype == "OP" and prev_type in (None, "OP", "LPAREN"):
+                self._log("[BUILDER] 연속 연산자 또는 선행 연산자 오류")
+                return False
+            prev_type = ttype
+        if depth != 0:
+            self._log("[BUILDER] 괄호 짝이 맞지 않습니다.")
+            return False
+        if tokens[-1].get("type") == "OP":
+            self._log("[BUILDER] 마지막 토큰이 연산자입니다.")
+            return False
+        self._log("[BUILDER] 문법 검증 OK")
+        return True
+
+    def _tokens_to_groups(self) -> list[list[str]]:
+        if not self.builder_tokens:
+            return []
+        if not self._validate_builder():
+            return []
+        groups: list[list[str]] = []
+        current: list[str] = []
+        depth = 0
+        for token in self.builder_tokens:
+            ttype = token.get("type")
+            if ttype == "LPAREN":
+                depth += 1
+            elif ttype == "RPAREN":
+                depth -= 1
+            elif ttype == "COND":
+                name = token.get("value")
+                if name and name not in current:
+                    current.append(name)
+            elif ttype == "OP" and token.get("value") == "AND" and depth == 0:
+                if current:
+                    groups.append(current)
+                    current = []
+        if current:
+            groups.append(current)
+        return groups
+
+    def _update_groups_from_tokens(self, reset_sets: bool = False) -> None:
+        groups = self._tokens_to_groups()
+        self.condition_manager.set_groups(groups)
+        if reset_sets:
+            self.condition_manager.reset_sets()
+        self._update_group_preview()
+
+    def _group_preview_text(self) -> str:
+        groups = self._tokens_to_groups()
+        if not groups:
+            return "(그룹 없음)"
+        parts: list[str] = []
+        for i, group in enumerate(groups, 1):
+            inner = " OR ".join(group) if group else "(empty)"
+            parts.append(f"(Group{i}: {inner})")
+        return " AND ".join(parts)
 
     def _update_group_preview(self) -> None:
         self.group_preview_label.setText(self._group_preview_text())
 
-    def _add_group(self) -> None:
-        selections = self._selected_condition_names()
-        if not selections:
-            self._log("[GROUP] 그룹을 만들 조건식을 먼저 선택하세요.")
-            return
-        group_name = f"Group {len(self.condition_groups) + 1}"
-        self.condition_groups.append({"name": group_name, "conditions": selections})
-        self._log(f"[GROUP] 그룹 추가: {group_name} ← {selections}")
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
-        self.condition_manager.reset_sets()
-        self._refresh_group_list()
-
-    def _add_selected_to_group(self) -> None:
-        idx = self.group_list.currentRow()
-        if idx < 0 or idx >= len(self.condition_groups):
-            self._log("[GROUP] 먼저 추가할 그룹을 선택하세요.")
-            return
-        selections = self._selected_condition_names()
-        if not selections:
-            self._log("[GROUP] 그룹에 넣을 조건식을 선택하세요.")
-            return
-        target = self.condition_groups[idx]
-        added = []
-        for name in selections:
-            if name not in target["conditions"]:
-                target["conditions"].append(name)
-                added.append(name)
-            else:
-                self._log(f"[GROUP] {target['name']}에 이미 존재: {name}")
-        if added:
-            self._log(f"[GROUP] {target['name']}에 조건 추가: {added}")
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
-        self.condition_manager.reset_sets()
-        self._refresh_group_list()
-
-    def _remove_from_group(self) -> None:
-        idx = self.group_list.currentRow()
-        if idx < 0 or idx >= len(self.condition_groups):
-            self._log("[GROUP] 제거할 그룹을 선택하세요.")
-            return
-        selected = [self.group_detail.item(i).data(Qt.UserRole) for i in range(self.group_detail.count()) if self.group_detail.item(i).isSelected()]
-        if not selected:
-            self._log("[GROUP] 그룹에서 제거할 조건을 선택하세요.")
-            return
-        before = len(self.condition_groups[idx]["conditions"])
-        self.condition_groups[idx]["conditions"] = [c for c in self.condition_groups[idx]["conditions"] if c not in selected]
-        after = len(self.condition_groups[idx]["conditions"])
-        self._log(f"[GROUP] {self.condition_groups[idx]['name']}에서 {before - after}개 제거: {selected}")
-        if not self.condition_groups[idx]["conditions"]:
-            self._log("[GROUP] 그룹이 비었습니다. 실행 전에 채워주세요.")
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
-        self.condition_manager.reset_sets()
-        self._refresh_group_list()
-
-    def _delete_group(self) -> None:
-        idx = self.group_list.currentRow()
-        if idx < 0 or idx >= len(self.condition_groups):
-            self._log("[GROUP] 삭제할 그룹을 선택하세요.")
-            return
-        removed = self.condition_groups.pop(idx)
-        self._log(f"[GROUP] 그룹 삭제: {removed.get('name', '')}")
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
-        self.condition_manager.reset_sets()
-        self._refresh_group_list()
-
     def _preview_candidates(self) -> None:
-        if not self.condition_groups:
-            self._log("[GROUP] 그룹이 없습니다. 그룹을 먼저 구성하세요.")
+        groups = self._tokens_to_groups()
+        if not groups:
+            self._log("[GROUP] 그룹이 없습니다. 토큰을 추가하세요.")
             return
-        missing_group = [g for g in self.condition_groups if not g.get("conditions")]
-        if missing_group:
+        if any(len(g) == 0 for g in groups):
             self._log("[GROUP] 비어있는 그룹이 있어 후보를 계산할 수 없습니다.")
             return
         final_set, group_sets = self.condition_manager.evaluate()
@@ -974,14 +1046,15 @@ class MainWindow(QMainWindow):
             openapi.load_conditions()
             return
 
-        if not self.condition_groups:
-            self._log("[GROUP] 그룹이 없습니다. 그룹을 먼저 구성하세요.")
+        groups = self._tokens_to_groups()
+        if not groups:
+            self._log("[GROUP] 토큰이 없거나 그룹이 비어 있습니다. 먼저 조건을 추가하세요.")
             return
-        if any(not g.get("conditions") for g in self.condition_groups):
+        if any(len(g) == 0 for g in groups):
             self._log("[GROUP] 비어있는 그룹이 있어 조건을 실행할 수 없습니다.")
             return
 
-        active_conditions = sorted({name for g in self.condition_groups for name in g.get("conditions", [])})
+        active_conditions = sorted({name for g in groups for name in g})
         missing = [name for name in active_conditions if name not in self.condition_map]
         if missing:
             self._log(f"[GROUP] 조건식 정보가 존재하지 않습니다: {missing}")
@@ -989,7 +1062,7 @@ class MainWindow(QMainWindow):
 
         self.condition_universe.clear()
         self.engine.set_external_universe([])
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
+        self.condition_manager.set_groups(groups)
         self.condition_manager.reset_sets()
         for name in active_conditions:
             idx, _ = self.condition_map[name]
@@ -1304,15 +1377,17 @@ class MainWindow(QMainWindow):
 
         valid_names = {name for _, name in self.all_conditions}
         pruned = False
-        for g in self.condition_groups:
-            before = len(g["conditions"])
-            g["conditions"] = [c for c in g["conditions"] if c in valid_names]
-            if len(g["conditions"]) != before:
+        new_tokens: list[dict] = []
+        for token in self.builder_tokens:
+            if token.get("type") == "COND" and token.get("value") not in valid_names:
                 pruned = True
+                self._log(f"[GROUP] 조건식이 더 이상 존재하지 않아 토큰에서 제거: {token.get('value')}")
+                continue
+            new_tokens.append(token)
         if pruned:
-            self._log("[GROUP] 일부 그룹 구성에 더 이상 존재하지 않는 조건식이 있어 제거했습니다.")
-        self.condition_manager.set_groups([g["conditions"] for g in self.condition_groups])
-        self._refresh_group_list()
+            self.builder_tokens = new_tokens
+            self._refresh_builder_strip()
+        self._update_groups_from_tokens(reset_sets=True)
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

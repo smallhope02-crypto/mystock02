@@ -1,7 +1,7 @@
 """Trade engine coordinating selector, strategy, and broker layers."""
 
 import logging
-from typing import List, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from .config import AppConfig
 from .kiwoom_client import KiwoomClient
@@ -22,12 +22,14 @@ class TradeEngine:
         broker_mode: str = "paper",
         kiwoom_client: KiwoomClient | None = None,
         paper_broker: PaperBroker | None = None,
+        log_fn: Optional[Callable[[str], None]] = None,
     ):
         self.strategy = strategy
         self.selector = selector
         self.broker_mode = broker_mode
         self.kiwoom_client = kiwoom_client or KiwoomClient(account_no="00000000")
         self.paper_broker = paper_broker or PaperBroker(initial_cash=self.strategy.initial_cash)
+        self.log_fn = log_fn
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 
@@ -98,6 +100,10 @@ class TradeEngine:
                     broker_result.price,
                     broker_result.status,
                 )
+                if self.log_fn:
+                    self.log_fn(
+                        f"[BUY] side={order.side} code={order.symbol} qty={broker_result.quantity} price={broker_result.price:.2f} mode=real"
+                    )
                 continue
 
             # paper mode
@@ -113,6 +119,10 @@ class TradeEngine:
             logger.info(
                 "Executed %s %s x%d at %.2f (%s)", order.side, order.symbol, filled_qty, fill_price, result.status
             )
+            if self.log_fn:
+                self.log_fn(
+                    f"[BUY] side={order.side} code={order.symbol} qty={filled_qty} price={fill_price:.2f} mode=paper"
+                )
 
     def _current_cash(self) -> float:
         if self.broker_mode == "real":

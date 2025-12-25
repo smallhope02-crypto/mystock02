@@ -9,6 +9,7 @@ try:
     from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
     from PyQt5.QtWidgets import (
         QApplication,
+        QAbstractScrollArea,
         QButtonGroup,
         QCheckBox,
         QComboBox,
@@ -224,6 +225,7 @@ class MainWindow(QMainWindow):
             selector=self.selector,
             broker_mode="paper",
             kiwoom_client=self.kiwoom_client,
+            log_fn=self._log,
         )
         self.condition_map = {}
         self.condition_manager = ConditionManager()
@@ -365,6 +367,9 @@ class MainWindow(QMainWindow):
         self.builder_strip = QListWidget()
         self.builder_strip.setSelectionMode(QListWidget.ExtendedSelection)
         self.builder_strip.setMinimumHeight(140)
+        self.builder_strip.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.builder_strip.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.builder_strip.setUniformItemSizes(True)
 
         builder_btn_row = QHBoxLayout()
         self.add_selected_btn = QPushButton("선택 추가(AND 체인)")
@@ -378,6 +383,8 @@ class MainWindow(QMainWindow):
 
         self.group_preview_label = QLabel("(그룹 미구성)")
         self.group_preview_label.setStyleSheet("color: blue;")
+        self.group_preview_label.setWordWrap(True)
+        self.group_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         right_panel.addWidget(self.builder_strip)
         right_panel.addLayout(builder_btn_row)
@@ -729,8 +736,9 @@ class MainWindow(QMainWindow):
             return
         codes = [code for code in str(code_list).split(";") if code]
         self.condition_manager.update_condition(condition_name, codes)
+        label = self._condition_id_text(condition_name)
         self._log(
-            f"[조건] 초기 조회 결과 수신({condition_name}/{index}) - {len(codes)}건"
+            f"[COND_EVT] 초기 조회 결과 수신 cond={condition_name}({label}) idx={index} count={len(codes)}"
         )
         self._recompute_universe()
 
@@ -740,8 +748,9 @@ class MainWindow(QMainWindow):
             return
         self.condition_manager.apply_event(condition_name, code, event)
         action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
+        label = self._condition_id_text(condition_name)
         self._log(
-            f"[조건-실시간] {action}: {code} (조건 {condition_name}/{condition_index})"
+            f"[COND_EVT] {action}: {code} (조건 {condition_name}/{label}/{condition_index})"
         )
         self._recompute_universe()
 
@@ -751,10 +760,12 @@ class MainWindow(QMainWindow):
         group_sizes = [len(s) for s in group_sets]
         self.condition_universe = set(final_set)
         self.engine.set_external_universe(list(final_set))
-        self._log(f"[GROUP] groups configured: {self._group_preview_text()}")
+        preview = self._group_preview_text()
+        sample = list(final_set)[:10]
+        self._log(f"[GROUP] groups configured: {preview}")
         self._log("[GROUP] evaluation rule: within-group=OR, between-groups=AND")
         self._log(
-            f"[GROUP] set sizes: cond={counts} groups={group_sizes} final candidates={len(final_set)}"
+            f"[EVAL] cond_counts={counts} group_sizes={group_sizes} final candidates={len(final_set)} sample={sample}"
         )
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
@@ -835,6 +846,12 @@ class MainWindow(QMainWindow):
     def _selected_condition_names(self) -> list[str]:
         return [name for _idx, name in self._selected_conditions()]
 
+    def _condition_id_text(self, name: str) -> str:
+        if name in self.condition_map:
+            idx, _ = self.condition_map[name]
+            return str(idx)
+        return name
+
     # Condition builder helpers --------------------------------------
     def _builder_log_tokens(self) -> None:
         pretty = " ".join(token.get("text", token.get("value", "")) for token in self.builder_tokens)
@@ -851,6 +868,9 @@ class MainWindow(QMainWindow):
             elif token["type"] in {"LPAREN", "RPAREN"}:
                 item.setForeground(Qt.darkGreen)
             item.setData(Qt.UserRole, token)
+            tooltip = token.get("tooltip") or token.get("value")
+            if tooltip:
+                item.setToolTip(str(tooltip))
             self.builder_strip.addItem(item)
         self.builder_strip.blockSignals(False)
         self._update_group_preview()
@@ -886,8 +906,8 @@ class MainWindow(QMainWindow):
             self._log("[BUILDER] 추가할 조건식을 선택하세요.")
             return
         # preserve display order in list
-        selected_nums = []
-        selected_names = []
+        selected_nums: list[int] = []
+        selected_names: list[str] = []
         for i in range(self.condition_list.count()):
             item = self.condition_list.item(i)
             if item.checkState() == Qt.Checked:
@@ -905,10 +925,17 @@ class MainWindow(QMainWindow):
                 selected_names.append(name)
 
         new_tokens: List[dict] = []
-        for i, name in enumerate(selected_names):
+        for i, (cond_id, name) in enumerate(zip(selected_nums, selected_names)):
             if i > 0:
                 new_tokens.append({"type": "OP", "value": "AND", "text": "AND"})
-            new_tokens.append({"type": "COND", "value": name, "text": name})
+            new_tokens.append(
+                {
+                    "type": "COND",
+                    "value": name,
+                    "text": str(cond_id),
+                    "tooltip": name,
+                }
+            )
 
         insert_at = self._current_insert_index()
         join_txt = "AND"
@@ -1008,7 +1035,8 @@ class MainWindow(QMainWindow):
             return "(그룹 없음)"
         parts: list[str] = []
         for i, group in enumerate(groups, 1):
-            inner = " OR ".join(group) if group else "(empty)"
+            labels = [self._condition_id_text(name) for name in group]
+            inner = " OR ".join(labels) if labels else "(empty)"
             parts.append(f"(Group{i}: {inner})")
         return " AND ".join(parts)
 
@@ -1053,6 +1081,11 @@ class MainWindow(QMainWindow):
         if any(len(g) == 0 for g in groups):
             self._log("[GROUP] 비어있는 그룹이 있어 조건을 실행할 수 없습니다.")
             return
+
+        self._log(
+            f"[GROUP] evaluation rule: within-group=OR, between-groups=AND | groups={self._group_preview_text()}"
+        )
+        self._builder_log_tokens()
 
         active_conditions = sorted({name for g in groups for name in g})
         missing = [name for name in active_conditions if name not in self.condition_map]
@@ -1117,6 +1150,9 @@ class MainWindow(QMainWindow):
             return
 
         self.engine.set_external_universe(list(self.condition_universe))
+        self._log(
+            f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
+        )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
         self.engine.run_once("combined")
         self._refresh_account()
@@ -1164,6 +1200,9 @@ class MainWindow(QMainWindow):
             self._refresh_positions(market_open=self._is_market_open())
             return
         self.engine.set_external_universe(list(self.condition_universe))
+        self._log(
+            f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
+        )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
         self.engine.run_once("combined")
         self._refresh_account()

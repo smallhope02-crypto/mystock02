@@ -363,7 +363,7 @@ class MainWindow(QMainWindow):
 
         # Expression builder strip
         right_panel = QVBoxLayout()
-        right_panel.addWidget(QLabel("조건 편집 스트립 (그룹=OR, 그룹 간 AND)"))
+        right_panel.addWidget(QLabel("조건 표현식 편집 (0150 스타일: 숫자/AND/OR/괄호)"))
         self.builder_strip = QListWidget()
         self.builder_strip.setSelectionMode(QListWidget.ExtendedSelection)
         self.builder_strip.setMinimumHeight(140)
@@ -381,14 +381,15 @@ class MainWindow(QMainWindow):
         builder_btn_row.addWidget(self.validate_btn)
         builder_btn_row.addWidget(self.clear_builder_btn)
 
-        self.group_preview_label = QLabel("(그룹 미구성)")
+        self.group_preview_label = QLabel("(표현식 미구성)")
         self.group_preview_label.setStyleSheet("color: blue;")
         self.group_preview_label.setWordWrap(True)
         self.group_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.group_preview_label.setMaximumWidth(700)
 
         right_panel.addWidget(self.builder_strip)
         right_panel.addLayout(builder_btn_row)
-        right_panel.addWidget(QLabel("조합 미리보기 (그룹=OR, 그룹 간 AND)"))
+        right_panel.addWidget(QLabel("조합 미리보기 (표현식 그대로 표시)"))
         right_panel.addWidget(self.group_preview_label)
 
         cond_layout.addLayout(left_panel)
@@ -755,17 +756,16 @@ class MainWindow(QMainWindow):
         self._recompute_universe()
 
     def _recompute_universe(self) -> None:
-        final_set, group_sets = self.condition_manager.evaluate()
+        final_set, postfix = self.condition_manager.evaluate()
         counts = self.condition_manager.counts()
-        group_sizes = [len(s) for s in group_sets]
+        postfix_txt = self.condition_manager.postfix_text(postfix)
+        infix = self.condition_manager.render_infix()
         self.condition_universe = set(final_set)
         self.engine.set_external_universe(list(final_set))
-        preview = self._group_preview_text()
         sample = list(final_set)[:10]
-        self._log(f"[GROUP] groups configured: {preview}")
-        self._log("[GROUP] evaluation rule: within-group=OR, between-groups=AND")
+        self._log(f"[EXPR] infix={infix} | postfix={postfix_txt}")
         self._log(
-            f"[EVAL] cond_counts={counts} group_sizes={group_sizes} final candidates={len(final_set)} sample={sample}"
+            f"[EVAL] cond_counts={counts} final candidates={len(final_set)} sample={sample}"
         )
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
@@ -852,9 +852,18 @@ class MainWindow(QMainWindow):
             return str(idx)
         return name
 
+    def _active_condition_names(self) -> list[str]:
+        seen: list[str] = []
+        for tok in self.builder_tokens:
+            if tok.get("type") == "COND":
+                name = str(tok.get("value"))
+                if name and name not in seen:
+                    seen.append(name)
+        return seen
+
     # Condition builder helpers --------------------------------------
     def _builder_log_tokens(self) -> None:
-        pretty = " ".join(token.get("text", token.get("value", "")) for token in self.builder_tokens)
+        pretty = self.condition_manager.render_infix(self.builder_tokens)
         self._log(f"[BUILDER] tokens: {pretty if pretty else '(empty)'}")
 
     def _refresh_builder_strip(self) -> None:
@@ -877,8 +886,7 @@ class MainWindow(QMainWindow):
 
     def _clear_builder(self) -> None:
         self.builder_tokens = []
-        self.condition_manager.set_groups([])
-        self.condition_manager.reset_sets()
+        self.condition_manager.set_expression_tokens([], reset_sets=True)
         self._refresh_builder_strip()
         self._log("[BUILDER] cleared")
 
@@ -898,7 +906,7 @@ class MainWindow(QMainWindow):
             tokens.insert(idx, token)
             idx += 1
         self._refresh_builder_strip()
-        self._update_groups_from_tokens(reset_sets=True)
+        self._update_expression_from_tokens(reset_sets=True)
 
     def _on_add_selected_conditions(self) -> None:
         selections = self._selected_conditions()
@@ -951,7 +959,7 @@ class MainWindow(QMainWindow):
         token["text"] = token["value"]
         item.setText(token["text"])
         self._log(f"[BUILDER] toggled operator: {token['value']}")
-        self._update_groups_from_tokens(reset_sets=False)
+        self._update_expression_from_tokens(reset_sets=False)
         self._builder_log_tokens()
 
     def _wrap_selection(self) -> None:
@@ -964,7 +972,7 @@ class MainWindow(QMainWindow):
         self.builder_tokens.insert(end + 2, {"type": "RPAREN", "value": ")", "text": ")"})
         self._log(f"[BUILDER] wrap tokens range {start}-{end}")
         self._refresh_builder_strip()
-        self._update_groups_from_tokens(reset_sets=False)
+        self._update_expression_from_tokens(reset_sets=False)
         self._builder_log_tokens()
 
     def _validate_builder(self) -> bool:
@@ -996,66 +1004,29 @@ class MainWindow(QMainWindow):
         self._log("[BUILDER] 문법 검증 OK")
         return True
 
-    def _tokens_to_groups(self) -> list[list[str]]:
-        if not self.builder_tokens:
-            return []
+    def _update_expression_from_tokens(self, reset_sets: bool = False) -> None:
         if not self._validate_builder():
-            return []
-        groups: list[list[str]] = []
-        current: list[str] = []
-        depth = 0
-        for token in self.builder_tokens:
-            ttype = token.get("type")
-            if ttype == "LPAREN":
-                depth += 1
-            elif ttype == "RPAREN":
-                depth -= 1
-            elif ttype == "COND":
-                name = token.get("value")
-                if name and name not in current:
-                    current.append(name)
-            elif ttype == "OP" and token.get("value") == "AND" and depth == 0:
-                if current:
-                    groups.append(current)
-                    current = []
-        if current:
-            groups.append(current)
-        return groups
-
-    def _update_groups_from_tokens(self, reset_sets: bool = False) -> None:
-        groups = self._tokens_to_groups()
-        self.condition_manager.set_groups(groups)
-        if reset_sets:
-            self.condition_manager.reset_sets()
+            return
+        self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=reset_sets)
         self._update_group_preview()
 
     def _group_preview_text(self) -> str:
-        groups = self._tokens_to_groups()
-        if not groups:
-            return "(그룹 없음)"
-        parts: list[str] = []
-        for i, group in enumerate(groups, 1):
-            labels = [self._condition_id_text(name) for name in group]
-            inner = " OR ".join(labels) if labels else "(empty)"
-            parts.append(f"(Group{i}: {inner})")
-        return " AND ".join(parts)
+        return self.condition_manager.render_infix(self.builder_tokens)
 
     def _update_group_preview(self) -> None:
         self.group_preview_label.setText(self._group_preview_text())
 
     def _preview_candidates(self) -> None:
-        groups = self._tokens_to_groups()
-        if not groups:
-            self._log("[GROUP] 그룹이 없습니다. 토큰을 추가하세요.")
+        if not self._validate_builder():
             return
-        if any(len(g) == 0 for g in groups):
-            self._log("[GROUP] 비어있는 그룹이 있어 후보를 계산할 수 없습니다.")
-            return
-        final_set, group_sets = self.condition_manager.evaluate()
+        self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=False)
+        final_set, postfix = self.condition_manager.evaluate()
         cond_counts = self.condition_manager.counts()
-        group_sizes = [len(s) for s in group_sets]
+        infix = self.condition_manager.render_infix(self.builder_tokens)
+        postfix_txt = self.condition_manager.postfix_text(postfix)
+        sample = list(final_set)[:10]
         self._log(
-            f"[GROUP] evaluation rule: within-group=OR, between-groups=AND | cond_counts={cond_counts} | group_sizes={group_sizes} | final candidates={len(final_set)}"
+            f"[EVAL] infix={infix} | postfix={postfix_txt} | cond_counts={cond_counts} | candidates={len(final_set)} sample={sample}"
         )
         self._update_group_preview()
 
@@ -1074,20 +1045,10 @@ class MainWindow(QMainWindow):
             openapi.load_conditions()
             return
 
-        groups = self._tokens_to_groups()
-        if not groups:
-            self._log("[GROUP] 토큰이 없거나 그룹이 비어 있습니다. 먼저 조건을 추가하세요.")
-            return
-        if any(len(g) == 0 for g in groups):
-            self._log("[GROUP] 비어있는 그룹이 있어 조건을 실행할 수 없습니다.")
+        if not self._validate_builder():
             return
 
-        self._log(
-            f"[GROUP] evaluation rule: within-group=OR, between-groups=AND | groups={self._group_preview_text()}"
-        )
-        self._builder_log_tokens()
-
-        active_conditions = sorted({name for g in groups for name in g})
+        active_conditions = self._active_condition_names()
         missing = [name for name in active_conditions if name not in self.condition_map]
         if missing:
             self._log(f"[GROUP] 조건식 정보가 존재하지 않습니다: {missing}")
@@ -1095,8 +1056,10 @@ class MainWindow(QMainWindow):
 
         self.condition_universe.clear()
         self.engine.set_external_universe([])
-        self.condition_manager.set_groups(groups)
-        self.condition_manager.reset_sets()
+        self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=True)
+        infix = self.condition_manager.render_infix(self.builder_tokens)
+        self._log(f"[EXPR] infix={infix}")
+        self._builder_log_tokens()
         for name in active_conditions:
             idx, _ = self.condition_map[name]
             self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
@@ -1106,8 +1069,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # pragma: no cover - runtime dependent
                 self._log(f"조건 실행 실패({name}): {exc}")
 
-        self._log(f"[GROUP] groups configured: {self._group_preview_text()}")
-        self._log("[GROUP] evaluation rule: within-group=OR, between-groups=AND")
+        self._log(f"[GROUP] expression configured: {self._group_preview_text()}")
+        self._log("[GROUP] evaluation rule: expression-based (AND>OR precedence)")
 
     def on_apply_strategy(self) -> None:
         params = dict(

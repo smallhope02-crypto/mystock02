@@ -1010,6 +1010,10 @@ class MainWindow(QMainWindow):
         self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=reset_sets)
         self._update_group_preview()
 
+    # Backward-compatibility wrapper for legacy callers.
+    def _update_groups_from_tokens(self, reset_sets: bool = False) -> None:
+        self._update_expression_from_tokens(reset_sets=reset_sets)
+
     def _group_preview_text(self) -> str:
         return self.condition_manager.render_infix(self.builder_tokens)
 
@@ -1389,7 +1393,11 @@ class MainWindow(QMainWindow):
         if pruned:
             self.builder_tokens = new_tokens
             self._refresh_builder_strip()
-        self._update_groups_from_tokens(reset_sets=True)
+        try:
+            self._update_expression_from_tokens(reset_sets=True)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"[ERR] refresh_condition_list update failed: {exc}")
+            logger.exception("Failed to refresh condition expression after reload")
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

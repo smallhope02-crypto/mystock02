@@ -63,6 +63,8 @@ class KiwoomClient:
             openapi.holdings_received.connect(self._on_holdings_signal)  # type: ignore[arg-type]
         if hasattr(openapi, "real_data_received"):
             openapi.real_data_received.connect(self._on_real_data)  # type: ignore[arg-type]
+        if hasattr(openapi, "chejan_received"):
+            openapi.chejan_received.connect(self._on_chejan)  # type: ignore[arg-type]
 
     def update_credentials(self, config: AppConfig) -> None:
         """Replace API credentials in memory.
@@ -144,6 +146,9 @@ class KiwoomClient:
         if price:
             self._last_prices[code] = price
 
+    def _on_chejan(self, payload: dict) -> None:
+        logger.info("[CHEJAN] payload=%s", payload)
+
     def _fetch_balance_from_kiwoom_api(self) -> int:
         """Placeholder for the real Kiwoom balance API call.
 
@@ -164,6 +169,18 @@ class KiwoomClient:
         """
 
         return {"cash": float(self.get_real_balance())}
+
+    def _can_send_real_order(self) -> bool:
+        if not self.openapi:
+            logger.warning("[REAL MODE] OpenAPI 미초기화로 주문 불가")
+            return False
+        if not getattr(self.openapi, "connected", False):
+            logger.warning("[REAL MODE] OpenAPI 미로그인 상태로 주문 불가")
+            return False
+        if hasattr(self.openapi, "is_simulation_server") and self.openapi.is_simulation_server():
+            logger.warning("[REAL MODE] 현재 서버가 모의(raw=1) → 주문 차단")
+            return False
+        return True
 
     def list_conditions(self) -> List[str]:
         """Return only condition names for backward compatibility."""
@@ -227,12 +244,50 @@ class KiwoomClient:
             self.openapi.load_conditions()
 
     def send_buy_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
-        logger.info("[REAL MODE] Would send buy order: %s x%d at %.2f", symbol, quantity, price)
-        return OrderResult(symbol=symbol, quantity=quantity, price=price, status="accepted")
+        if self._can_send_real_order():
+            ok = False
+            if hasattr(self.openapi, "send_order"):
+                ok = bool(
+                    self.openapi.send_order(
+                        rqname="buy",
+                        screen_no="9001",
+                        accno=self.account_no,
+                        order_type=1,
+                        code=symbol,
+                        qty=int(quantity),
+                        price=int(price),
+                        hogagb="00",
+                        org_order_no="",
+                    )
+                )
+            status = "accepted" if ok else "error"
+            logger.info("[REAL MODE] SendOrder buy dispatched=%s", ok)
+            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=price, status=status)
+        logger.warning("[REAL MODE] 주문 차단 (server/mock/login 확인 필요)")
+        return OrderResult(symbol=symbol, quantity=0, price=price, status="blocked")
 
     def send_sell_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
-        logger.info("[REAL MODE] Would send sell order: %s x%d at %.2f", symbol, quantity, price)
-        return OrderResult(symbol=symbol, quantity=quantity, price=price, status="accepted")
+        if self._can_send_real_order():
+            ok = False
+            if hasattr(self.openapi, "send_order"):
+                ok = bool(
+                    self.openapi.send_order(
+                        rqname="sell",
+                        screen_no="9001",
+                        accno=self.account_no,
+                        order_type=2,
+                        code=symbol,
+                        qty=int(quantity),
+                        price=int(price),
+                        hogagb="00",
+                        org_order_no="",
+                    )
+                )
+            status = "accepted" if ok else "error"
+            logger.info("[REAL MODE] SendOrder sell dispatched=%s", ok)
+            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=price, status=status)
+        logger.warning("[REAL MODE] 주문 차단 (server/mock/login 확인 필요)")
+        return OrderResult(symbol=symbol, quantity=0, price=price, status="blocked")
 
     def get_current_price(self, symbol: str) -> float:
         """Return a dummy current price for a symbol."""

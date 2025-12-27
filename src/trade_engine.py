@@ -91,7 +91,8 @@ class TradeEngine:
                     if order.side == "buy"
                     else self.kiwoom_client.send_sell_order(order.symbol, order.quantity, order.price)
                 )
-                self.strategy.register_fill(order, broker_result.quantity, broker_result.price)
+                if broker_result.status == "accepted" and broker_result.quantity:
+                    self.strategy.register_fill(order, broker_result.quantity, broker_result.price)
                 logger.info(
                     "Executed %s %s x%d at %.2f (%s)",
                     order.side,
@@ -102,7 +103,7 @@ class TradeEngine:
                 )
                 if self.log_fn:
                     self.log_fn(
-                        f"[BUY] side={order.side} code={order.symbol} qty={broker_result.quantity} price={broker_result.price:.2f} mode=real"
+                        f"[BUY] side={order.side} code={order.symbol} qty={broker_result.quantity} price={broker_result.price:.2f} mode=real status={broker_result.status}"
                     )
                 continue
 

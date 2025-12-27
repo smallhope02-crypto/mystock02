@@ -118,6 +118,21 @@ class _DisabledOpenAPI:
     def get_last_price(self, code: str) -> float:
         return float(self.last_prices.get(code, 0))
 
+    def send_order(
+        self,
+        rqname: str,
+        screen_no: str,
+        accno: str,
+        order_type: int,
+        code: str,
+        qty: int,
+        price: int,
+        hogagb: str,
+        org_order_no: str = "",
+    ) -> bool:
+        print("[OpenAPI] SendOrder skipped: QAx unavailable")
+        return False
+
 
 if not QAX_AVAILABLE:  # pragma: no cover - fallback path
     KiwoomOpenAPI = _DisabledOpenAPI  # type: ignore
@@ -136,6 +151,7 @@ else:
         tr_condition_received = QtCore.pyqtSignal(str, str, str, int, str)
         real_condition_received = QtCore.pyqtSignal(str, str, str, str)
         real_data_received = QtCore.pyqtSignal(str, dict)
+        chejan_received = QtCore.pyqtSignal(dict)
         accounts_received = QtCore.pyqtSignal(list)
         balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
         holdings_received = QtCore.pyqtSignal(list)  # list of dicts
@@ -213,6 +229,7 @@ else:
                 "OnReceiveRealCondition": self._on_receive_real_condition,
                 "OnReceiveTrData": self._on_receive_tr_data,
                 "OnReceiveRealData": self._on_receive_real_data,
+                "OnReceiveChejanData": self._on_receive_chejan_data,
             }
 
             for name, handler in bindings.items():
@@ -472,6 +489,28 @@ else:
             except Exception as exc:
                 print(f"[OpenAPI] Failed to parse real data for {code}: {exc}")
 
+        def _on_receive_chejan_data(self, gubun: str, item_cnt: int, fid_list: str) -> None:
+            """Relay chejan(order/exec) events downstream."""
+
+            payload: dict[str, object] = {
+                "gubun": str(gubun),
+                "item_cnt": int(item_cnt),
+                "fid_list": str(fid_list),
+            }
+            try:
+                ax = self.ax
+                if ax and hasattr(ax, "dynamicCall"):
+                    for fid in (9203, 9001, 302, 10, 904, 913):
+                        try:
+                            payload[str(fid)] = ax.dynamicCall("GetChejanData(int)", int(fid))
+                        except Exception:
+                            payload[str(fid)] = ""
+                print(f"[OpenAPI] OnReceiveChejanData payload={payload}")
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                print(f"[OpenAPI] Chejan 처리 실패: {exc}")
+            if self.chejan_received:
+                self.chejan_received.emit(payload)
+
         # -- Accounts / balances ----------------------------------------
         def request_account_list(self) -> None:
             if not self.is_enabled():
@@ -518,6 +557,61 @@ else:
             decision = raw == "1"
             print(f"[DEBUG] server_decision={'SIMULATION' if decision else 'REAL_OR_UNKNOWN'} raw={raw!r}")
             return decision
+
+        # -- Ordering ----------------------------------------------------
+        def send_order(
+            self,
+            rqname: str,
+            screen_no: str,
+            accno: str,
+            order_type: int,
+            code: str,
+            qty: int,
+            price: int,
+            hogagb: str,
+            org_order_no: str = "",
+        ) -> bool:
+            """Call the real SendOrder via dynamicCall.
+
+            The actual result is delivered asynchronously through
+            ``OnReceiveChejanData``. Returns ``True`` when the COM call was
+            dispatched without raising.
+            """
+
+            if not self.is_enabled() or not self.connected:
+                print("[OpenAPI] SendOrder 불가: 컨트롤 비활성 또는 미로그인")
+                return False
+            if self.is_simulation_server():
+                print("[OpenAPI] SendOrder 차단: 현재 서버는 모의(raw=1)")
+                return False
+            try:
+                ax = self.ax
+                if not ax or not hasattr(ax, "dynamicCall"):
+                    raise RuntimeError("QAxWidget dynamicCall 불가")
+                print(
+                    f"[OpenAPI] SendOrder rqname={rqname} screen={screen_no} accno={accno} "
+                    f"type={order_type} code={code} qty={qty} price={price} hoga={hogagb} org={org_order_no}",
+                    flush=True,
+                )
+                ax.dynamicCall(
+                    "SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
+                    rqname,
+                    screen_no,
+                    accno,
+                    int(order_type),
+                    code,
+                    int(qty),
+                    int(price),
+                    hogagb,
+                    org_order_no,
+                )
+                return True
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                print(f"[OpenAPI] SendOrder 실패: {exc}")
+                traceback.print_exc()
+                self.init_error = exc
+                self._init_error = exc
+                return False
 
         # -- Real-time price helpers -----------------------------------
         def set_real_reg(self, codes: List[str], fids: str = "10;11;12", screen_no: str = "9999") -> None:

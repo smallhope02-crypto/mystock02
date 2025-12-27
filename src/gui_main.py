@@ -21,6 +21,7 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QInputDialog,
         QListWidget,
         QListWidgetItem,
         QMainWindow,
@@ -322,6 +323,7 @@ class MainWindow(QMainWindow):
         self.account_pw_input = QLineEdit()
         self.account_pw_input.setEchoMode(QLineEdit.Password)
         self.account_pw_input.setPlaceholderText("계좌 비밀번호(조회용)")
+        self.real_order_checkbox = QCheckBox("실주문 활성화")
         self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
         self.real_balance_label.setStyleSheet("color: gray;")
         self.real_balance_refresh = QPushButton("잔고 새로고침")
@@ -330,6 +332,7 @@ class MainWindow(QMainWindow):
         real_layout.addWidget(self.server_label)
         real_layout.addWidget(QLabel("비밀번호(조회)"))
         real_layout.addWidget(self.account_pw_input)
+        real_layout.addWidget(self.real_order_checkbox)
         real_layout.addWidget(self.real_balance_label)
         real_layout.addWidget(self.real_balance_refresh)
         self.real_group.setLayout(real_layout)
@@ -505,6 +508,7 @@ class MainWindow(QMainWindow):
         self.validate_btn.clicked.connect(self._validate_builder)
         self.clear_builder_btn.clicked.connect(self._clear_builder)
         self.builder_strip.itemDoubleClicked.connect(self._toggle_operator_token)
+        self.real_order_checkbox.toggled.connect(self._on_real_order_toggled)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
         self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
@@ -669,6 +673,8 @@ class MainWindow(QMainWindow):
             self.real_balance_label.setStyleSheet("color: black;")
         else:
             self.real_balance_label.setStyleSheet("color: gray;")
+        if mode == "paper":
+            self.real_order_checkbox.setChecked(False)
         if self.openapi_widget:
             self._update_server_label(self.openapi_widget.get_server_gubun())
         self._load_strategy_settings()
@@ -676,6 +682,21 @@ class MainWindow(QMainWindow):
         self._update_connection_labels()
         self.status_label.setText("상태: 대기중")
         self._save_current_settings()
+
+    def _on_real_order_toggled(self, checked: bool) -> None:
+        if not checked:
+            self._log("[주문] 실주문 비활성화")
+            return
+        text, ok = QInputDialog.getText(
+            self,
+            "실주문 활성화 확인",
+            "실제 주문을 보내려면 '실주문'을 입력하세요:",
+        )
+        if not ok or text.strip() != "실주문":
+            self._log("[주문] 확인 문구 불일치로 실주문 비활성화")
+            self.real_order_checkbox.setChecked(False)
+            return
+        self._log("[주문] 실주문 활성화됨 — 장시간/서버 검증 후에만 SendOrder 호출")
 
     def on_open_config(self) -> None:
         dialog = ConfigDialog(self, self.current_config, self.kiwoom_client, self.settings, self._settings_mode())
@@ -1104,6 +1125,9 @@ class MainWindow(QMainWindow):
             )
             if proceed != QMessageBox.Yes:
                 return
+        if self.engine.broker_mode == "real" and not self.real_order_checkbox.isChecked():
+            self._log("[주문] 실주문 비활성화 상태 → 테스트 실행 차단")
+            return
 
         if self.enforce_market_hours and not self._is_market_open():
             now = datetime.datetime.now()
@@ -1135,6 +1159,9 @@ class MainWindow(QMainWindow):
             self._log(
                 f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode} server_gubun={server_info}"
             )
+            if self.engine.broker_mode == "real" and not self.real_order_checkbox.isChecked():
+                self._log("[주문] 실주문 비활성화 상태 → 자동매수 시작 차단")
+                return
             if self.enforce_market_hours and not self._is_market_open():
                 now = datetime.datetime.now()
                 self._log(

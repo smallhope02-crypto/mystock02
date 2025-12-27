@@ -976,10 +976,23 @@ class MainWindow(QMainWindow):
         token = item.data(Qt.UserRole)
         if not token or token.get("type") != "OP":
             return
-        token["value"] = "OR" if token.get("value") == "AND" else "AND"
-        token["text"] = token["value"]
-        item.setText(token["text"])
-        self._log(f"[BUILDER] toggled operator: {token['value']}")
+
+        row = self.builder_strip.row(item)
+        if row < 0 or row >= len(self.builder_tokens):
+            return
+
+        old = self.builder_tokens[row].get("value")
+        new_val = "OR" if old == "AND" else "AND"
+        # Update the single source of truth first.
+        self.builder_tokens[row]["value"] = new_val
+        self.builder_tokens[row]["text"] = new_val
+
+        # Keep the QListWidget item in sync with the token dict.
+        item.setText(new_val)
+        item.setData(Qt.UserRole, self.builder_tokens[row])
+
+        self._log(f"[BUILDER] toggled operator idx={row}: {old} -> {new_val}")
+        # Re-evaluate expression so preview/ConditionManager stay aligned.
         self._update_expression_from_tokens(reset_sets=False)
         self._builder_log_tokens()
 
@@ -1029,6 +1042,13 @@ class MainWindow(QMainWindow):
         if not self._validate_builder():
             return
         self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=reset_sets)
+        # Log a quick snapshot of the current expression/postfix so UI and evaluator stay transparent.
+        candidates, postfix = self.condition_manager.evaluate()
+        infix_txt = self.condition_manager.render_infix(self.builder_tokens)
+        postfix_txt = self.condition_manager.postfix_text(postfix)
+        self._log(
+            f"[EXPR] infix='{infix_txt}' postfix='{postfix_txt}' candidates={len(candidates)}"
+        )
         self._update_group_preview()
 
     # Backward-compatibility wrapper for legacy callers.

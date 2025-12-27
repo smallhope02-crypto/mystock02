@@ -235,11 +235,16 @@ class MainWindow(QMainWindow):
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
+        self.auto_trading_active: bool = False
+        self.auto_trading_armed: bool = False
+        self.trading_orders_enabled: bool = False
         self._name_cache: dict[str, str] = {}
         self._price_cache: dict[str, float] = {}
         self._last_price_refresh_reason: str = ""
         self._saved_mode: str = "paper"
         self.real_holdings: list[dict] = []
+        self._last_market_log: Optional[datetime.datetime] = None
+        self._last_market_reason: str = ""
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -1105,6 +1110,11 @@ class MainWindow(QMainWindow):
         infix = self.condition_manager.render_infix(self.builder_tokens)
         self._log(f"[EXPR] infix={infix}")
         self._builder_log_tokens()
+        open_flag, reason, now = self._market_state()
+        if self.enforce_market_hours and not open_flag:
+            self._log(
+                f"[조건] 실행/등록 시작 (장전: register_only=True, 주문 차단) reason={reason}"
+            )
         for name in active_conditions:
             idx, _ = self.condition_map[name]
             self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
@@ -1149,11 +1159,9 @@ class MainWindow(QMainWindow):
             self._log("[주문] 실주문 비활성화 상태 → 테스트 실행 차단")
             return
 
-        if self.enforce_market_hours and not self._is_market_open():
-            now = datetime.datetime.now()
-            self._log(
-                f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
-            )
+        open_flag, reason, now = self._market_state()
+        if self.enforce_market_hours and not open_flag:
+            self._log_market_guard(reason, now)
             return
 
         if not self.condition_universe:
@@ -1165,50 +1173,73 @@ class MainWindow(QMainWindow):
             f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
         )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        self.engine.run_once("combined")
+        allow_orders = self.trading_orders_enabled or open_flag
+        if not allow_orders:
+            self._log("[자동매매] 주문 비활성 상태 → 평가만 수행 또는 스킵")
+        self.engine.run_once("combined", allow_orders=allow_orders)
         self._refresh_account()
         self._refresh_positions(market_open=self._is_market_open())
         self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
 
     def on_auto_start(self) -> None:
-        if not self.auto_timer.isActive():
-            server_info = "-"
-            openapi = getattr(self.kiwoom_client, "openapi", None)
-            if openapi:
-                server_info = openapi.get_server_gubun_raw()
-            self._log(
-                f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode} server_gubun={server_info}"
-            )
-            if self.engine.broker_mode == "real" and not self.real_order_checkbox.isChecked():
-                self._log("[주문] 실주문 비활성화 상태 → 자동매수 시작 차단")
-                return
-            if self.enforce_market_hours and not self._is_market_open():
-                now = datetime.datetime.now()
-                self._log(
-                    f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
-                )
-                return
-            self.auto_timer.start()
-            self.status_label.setText("상태: 자동 매매 중 (매수 시작됨)")
-            self._log("자동 매매 시작")
+        if self.auto_timer.isActive():
+            return
+
+        server_info = "-"
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if openapi:
+            server_info = openapi.get_server_gubun_raw()
+        self._log(
+            f"[자동매매] 시작 버튼 클릭 - mode={self.engine.broker_mode} server_gubun={server_info}"
+        )
+        if self.engine.broker_mode == "real" and not self.real_order_checkbox.isChecked():
+            self._log("[주문] 실주문 비활성화 상태 → 자동매수 시작 차단")
+            return
+
+        open_flag, reason, now = self._market_state()
+        self.auto_trading_active = True
+        if open_flag:
+            self.auto_trading_armed = False
+            self.trading_orders_enabled = True
+            self.status_label.setText("상태: 자동 매매 중 (주문 활성화)")
+        else:
+            self.auto_trading_armed = True
+            self.trading_orders_enabled = False
+            self.status_label.setText("상태: 감시중 (장전 대기)")
+            self._log_market_guard(reason, now)
+
+        self.auto_timer.start()
+        self._log("자동 매매 시작 (타이머 가동)")
 
     def on_auto_stop(self) -> None:
         if self.auto_timer.isActive():
             self.auto_timer.stop()
             self.status_label.setText("상태: 매수 종료됨 (자동 정지)")
             self._log("자동 매매 정지")
+        self.auto_trading_active = False
+        self.auto_trading_armed = False
+        self.trading_orders_enabled = False
 
     def _on_cycle(self) -> None:
         self._on_eod_check()
         if self.eod_executed_today == datetime.date.today():
             return
-        now = datetime.datetime.now()
-        if self.enforce_market_hours and not self._is_market_open():
-            self._log(
-                f"[장시간] 매매 스킵: 장 시간이 아님 (now={now.strftime('%H:%M:%S')}, range={self.market_start}-{self.market_end})"
-            )
+        open_flag, reason, now = self._market_state()
+        if self.enforce_market_hours and not open_flag:
+            if self.trading_orders_enabled or not self.auto_trading_armed:
+                self.trading_orders_enabled = False
+                self.auto_trading_armed = True
+                self._log(
+                    f"[상태] 장전/휴장 감시모드 진입: 주문 차단 (reason={reason})"
+                )
+            self._log_market_guard(reason, now)
             self._refresh_positions(market_open=False)
             return
+        # 장중 전환 감지
+        if self.auto_trading_armed or not self.trading_orders_enabled:
+            self.trading_orders_enabled = True
+            self.auto_trading_armed = False
+            self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
         if not self.condition_universe:
             self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
             self._refresh_positions(market_open=self._is_market_open())
@@ -1218,16 +1249,44 @@ class MainWindow(QMainWindow):
             f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
         )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        self.engine.run_once("combined")
+        allow_orders = self.trading_orders_enabled
+        if not allow_orders:
+            self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
+        self.engine.run_once("combined", allow_orders=allow_orders)
         self._refresh_account()
         self._refresh_positions(market_open=self._is_market_open())
 
-    def _is_market_open(self) -> bool:
+    def _market_state(self) -> tuple[bool, str, datetime.datetime]:
         now = datetime.datetime.now()
-        if now.weekday() >= 5:  # 주말
-            return False
+        weekday = now.strftime("%a")
+        if now.weekday() >= 5:
+            return False, f"주말/휴장 (weekday={weekday})", now
         now_time = now.time()
-        return self.market_start <= now_time <= self.market_end
+        if now_time < self.market_start:
+            return False, (
+                f"정규장 전 (now={now.strftime('%Y-%m-%d %H:%M:%S')} weekday={weekday} range={self.market_start}-{self.market_end})"
+            ), now
+        if now_time > self.market_end:
+            return False, (
+                f"정규장 종료 후 (now={now.strftime('%Y-%m-%d %H:%M:%S')} weekday={weekday} range={self.market_start}-{self.market_end})"
+            ), now
+        return True, (
+            f"정규장 중 (now={now.strftime('%Y-%m-%d %H:%M:%S')} weekday={weekday} range={self.market_start}-{self.market_end})"
+        ), now
+
+    def _is_market_open(self) -> bool:
+        open_flag, _, _ = self._market_state()
+        return open_flag
+
+    def _log_market_guard(self, reason: str, now: datetime.datetime) -> None:
+        if self._last_market_reason != reason or not self._last_market_log:
+            self._last_market_reason = reason
+            self._last_market_log = now
+            self._log(f"[장시간] {reason}")
+            return
+        if (now - self._last_market_log).total_seconds() >= 60:
+            self._last_market_log = now
+            self._log(f"[장시간] {reason} (지속)")
 
     def _on_eod_check(self) -> None:
         if not self.eod_checkbox.isChecked():

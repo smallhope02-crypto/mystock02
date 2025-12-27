@@ -61,16 +61,27 @@ class TradeEngine:
             return price
         return self.paper_broker.get_current_price(symbol)
 
-    def run_once(self, condition_name: str) -> None:
-        """Execute one scan/evaluation cycle."""
+    def run_once(self, condition_name: str, allow_orders: bool = True) -> None:
+        """Execute one scan/evaluation cycle.
+
+        Parameters
+        ----------
+        condition_name: str
+            Label passed to the selector.
+        allow_orders: bool
+            When False the evaluation still runs, but order execution is skipped. This
+            lets callers arm monitoring before the market opens without risking
+            inadvertent SendOrder calls.
+        """
+
         self.strategy.cash = self._current_cash()
         universe = self.selector.select(condition_name)
 
         exit_orders = self.strategy.evaluate_exit(self._active_price_lookup)
-        self._execute_orders(exit_orders)
+        self._execute_orders(exit_orders, allow_orders=allow_orders)
 
         entry_orders = self.strategy.evaluate_entry(universe, self._active_price_lookup)
-        self._execute_orders(entry_orders)
+        self._execute_orders(entry_orders, allow_orders=allow_orders)
 
         # Keep strategy cash aligned to the active broker's view
         self.strategy.cash = self._current_cash()
@@ -82,8 +93,14 @@ class TradeEngine:
         self._execute_orders(orders)
         self.strategy.cash = self._current_cash()
 
-    def _execute_orders(self, orders: Sequence[Order]) -> None:
+    def _execute_orders(self, orders: Sequence[Order], allow_orders: bool = True) -> None:
         for order in orders:
+            if not allow_orders:
+                if self.log_fn:
+                    self.log_fn(
+                        f"[BUY] side={order.side} code={order.symbol} qty={order.quantity} price={order.price:.2f} mode={self.broker_mode} status=skipped (orders disabled)"
+                    )
+                continue
             if self.broker_mode == "real":
                 logger.info("[주문] 실거래 모드 — SendOrder 호출 예정 (%s %s x%d)", order.side, order.symbol, order.quantity)
                 broker_result = (

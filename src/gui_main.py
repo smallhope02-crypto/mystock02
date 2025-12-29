@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
             log_fn=self._log,
         )
         self.condition_map = {}
+        self.condition_screens: dict[str, str] = {}
         self.condition_manager = ConditionManager()
         self.builder_tokens: list[dict] = []
         self.condition_universe: set[str] = set()
@@ -758,10 +759,12 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str, str, int, str)
     def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
-        if condition_name not in self.condition_manager.condition_sets:
-            self._log(f"[조건] 무시: 활성 조건 목록에 없는 {condition_name}")
-            return
         codes = [code for code in str(code_list).split(";") if code]
+        if condition_name not in self.condition_manager.condition_sets:
+            active = list(self.condition_manager.condition_sets.keys())
+            self._log(
+                f"[조건][WARN] 수신된 조건({condition_name})이 활성 목록에 없습니다. active={active}"
+            )
         self.condition_manager.update_condition(condition_name, codes)
         label = self._condition_id_text(condition_name)
         self._log(
@@ -1117,10 +1120,17 @@ class MainWindow(QMainWindow):
             )
         for name in active_conditions:
             idx, _ = self.condition_map[name]
-            self._log(f"[조건] SendCondition 호출 - {name}({idx}), 실시간 등록 포함")
             try:
-                screen_no = f"{openapi.screen_no}{idx}"
-                openapi.send_condition(screen_no, name, idx, 1)
+                screen_no = openapi.allocate_screen_no(idx) if hasattr(openapi, "allocate_screen_no") else openapi.screen_no
+                self.condition_screens[name] = screen_no
+                ret = openapi.send_condition(screen_no, name, idx, 1)
+                self._log(
+                    f"[조건] SendCondition name={name} idx={idx} screen={screen_no} search_type=1 ret={ret}"
+                )
+                if ret != 1:
+                    self._log(
+                        f"[조건][ERROR] SendCondition 실패 name={name} idx={idx} screen={screen_no} ret={ret}"
+                    )
             except Exception as exc:  # pragma: no cover - runtime dependent
                 self._log(f"조건 실행 실패({name}): {exc}")
 
@@ -1165,7 +1175,12 @@ class MainWindow(QMainWindow):
             return
 
         if not self.condition_universe:
-            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            self._log(
+                "[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵"
+            )
+            self._log(
+                "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+            )
             return
 
         self.engine.set_external_universe(list(self.condition_universe))
@@ -1241,7 +1256,12 @@ class MainWindow(QMainWindow):
             self.auto_trading_armed = False
             self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
         if not self.condition_universe:
-            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            self._log(
+                "[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵"
+            )
+            self._log(
+                "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+            )
             self._refresh_positions(market_open=self._is_market_open())
             return
         self.engine.set_external_universe(list(self.condition_universe))

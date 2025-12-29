@@ -91,8 +91,19 @@ class _DisabledOpenAPI:
     def get_condition_name_list(self) -> List[Tuple[int, str]]:
         return []
 
-    def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int) -> None:
-        return None
+    def allocate_screen_no(self, key: int) -> str:
+        base = 5000
+        offset = key % 800  # keep within 4 digits and avoid 0000
+        screen = base + offset
+        if screen % 10000 == 0:
+            screen += 1
+        return f"{screen:04d}"
+
+    def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int) -> int:
+        print(
+            f"[OpenAPI-disabled] SendCondition screen={screen_no} name={condition_name} index={index} search_type={search_type}"
+        )
+        return 0
 
     def get_last_universe(self) -> List[str]:
         return []
@@ -382,23 +393,39 @@ else:
             return [(int(idx), name) for idx, name in self.get_conditions()]
 
         # -- Condition universe -----------------------------------------
-        def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int = 1) -> None:
+        def allocate_screen_no(self, key: int) -> str:
+            base = 5000
+            offset = key % 800  # keep under 4 digits, avoid 0000
+            screen = base + offset
+            if screen % 10000 == 0:
+                screen += 1
+            return f"{screen:04d}"
+
+        def send_condition(self, screen_no: str, condition_name: str, index: int, search_type: int = 1) -> int:
             """Run a condition by index/name and optionally register real-time (search_type=1)."""
 
             if not self.conditions_loaded:
                 print("[OpenAPI] 조건식이 로딩되지 않았습니다.")
-                return
+                return 0
             target = self.ax
             try:
                 if target and hasattr(target, "dynamicCall"):
-                    target.dynamicCall(
+                    ret = target.dynamicCall(
                         "SendCondition(QString, QString, int, int)", screen_no, condition_name, int(index), int(search_type)
                     )
-                else:
-                    raise RuntimeError("SendCondition 사용 불가")
+                    print(
+                        f"[OpenAPI] SendCondition screen={screen_no} name={condition_name} index={index} search_type={search_type} ret={ret}"
+                    )
+                    if ret != 1:
+                        print(
+                            f"[OpenAPI][ERROR] SendCondition 실패 ret={ret} screen={screen_no} name={condition_name} index={index} search_type={search_type}"
+                        )
+                    return int(ret)
+                raise RuntimeError("SendCondition 사용 불가")
             except Exception as exc:
                 print(f"[OpenAPI] SendCondition 실패: {exc}")
                 traceback.print_exc()
+                return 0
 
         def request_condition_universe(self, condition_index: int, condition_name: str, search_type: int = 0) -> List[str]:
             if not self.conditions_loaded:

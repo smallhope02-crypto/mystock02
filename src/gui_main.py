@@ -228,11 +228,13 @@ class MainWindow(QMainWindow):
             kiwoom_client=self.kiwoom_client,
             log_fn=self._log,
         )
+        self.engine.set_buy_limits(rebuy_after_sell_today=False, max_buy_per_symbol_today=1)
         self.condition_map = {}
         self.condition_screens: dict[str, str] = {}
         self.condition_manager = ConditionManager()
         self.builder_tokens: list[dict] = []
         self.condition_universe: set[str] = set()
+        self.condition_universe_today: set[str] = set()
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
@@ -246,6 +248,8 @@ class MainWindow(QMainWindow):
         self.real_holdings: list[dict] = []
         self._last_market_log: Optional[datetime.datetime] = None
         self._last_market_reason: str = ""
+        self._pending_trigger_name: str = ""
+        self._pending_today_candidates: list[str] = []
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -357,9 +361,17 @@ class MainWindow(QMainWindow):
         self.condition_list.setSelectionMode(QListWidget.MultiSelection)
         self.condition_list.setMinimumWidth(400)
         self.all_conditions: list[tuple[int, str]] = []
+        self.trigger_combo = QComboBox()
+        self.trigger_combo.addItem("(사용 안 함)", "")
+        self.today_candidate_list = QListWidget()
+        self.today_candidate_list.setSelectionMode(QListWidget.MultiSelection)
         self.refresh_conditions_btn = QPushButton("조건 새로고침")
         self.run_condition_btn = QPushButton("조건 실행(실시간 포함)")
         self.preview_candidates_btn = QPushButton("후보 보기")
+        self.gate_after_trigger_checkbox = QCheckBox("트리거 발생 후 오늘누적 포함")
+        self.gate_after_trigger_checkbox.setChecked(False)
+        self.allow_premarket_monitor_checkbox = QCheckBox("장전 감시 허용(주문은 장중)")
+        self.allow_premarket_monitor_checkbox.setChecked(True)
 
         left_panel = QVBoxLayout()
         left_panel.addWidget(QLabel("조건식 목록"))
@@ -369,6 +381,12 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.run_condition_btn)
         btn_row.addWidget(self.preview_candidates_btn)
         left_panel.addLayout(btn_row)
+        gate_layout = QFormLayout()
+        gate_layout.addRow("트리거 조건", self.trigger_combo)
+        gate_layout.addRow("오늘누적 후보", self.today_candidate_list)
+        gate_layout.addRow(self.gate_after_trigger_checkbox)
+        gate_layout.addRow(self.allow_premarket_monitor_checkbox)
+        left_panel.addLayout(gate_layout)
 
         # Expression builder strip
         right_panel = QVBoxLayout()
@@ -461,6 +479,12 @@ class MainWindow(QMainWindow):
         param_layout.addRow("보유 시간 제한", self.time_limit_input)
         param_layout.addRow("최대 보유 종목 수", self.max_pos_input)
         param_layout.addRow(self.eod_checkbox, self.eod_time_edit)
+        self.rebuy_after_sell_checkbox = QCheckBox("오늘 매수 종목 매도 후 재매수 허용")
+        self.max_buy_per_symbol_spin = QSpinBox()
+        self.max_buy_per_symbol_spin.setRange(0, 10)
+        self.max_buy_per_symbol_spin.setValue(1)
+        param_layout.addRow(self.rebuy_after_sell_checkbox, QLabel("(기본 OFF)"))
+        param_layout.addRow("종목별 최대 매수 횟수(오늘)", self.max_buy_per_symbol_spin)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.apply_btn)
@@ -513,6 +537,12 @@ class MainWindow(QMainWindow):
         self.wrap_btn.clicked.connect(self._wrap_selection)
         self.validate_btn.clicked.connect(self._validate_builder)
         self.clear_builder_btn.clicked.connect(self._clear_builder)
+        self.trigger_combo.currentIndexChanged.connect(self._save_current_settings)
+        self.today_candidate_list.itemChanged.connect(lambda *_: self._save_current_settings())
+        self.gate_after_trigger_checkbox.toggled.connect(self._save_current_settings)
+        self.allow_premarket_monitor_checkbox.toggled.connect(self._save_current_settings)
+        self.rebuy_after_sell_checkbox.toggled.connect(self._on_buy_limit_changed)
+        self.max_buy_per_symbol_spin.valueChanged.connect(self._on_buy_limit_changed)
         self.builder_strip.itemDoubleClicked.connect(self._toggle_operator_token)
         self.real_order_checkbox.toggled.connect(self._on_real_order_toggled)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
@@ -579,6 +609,7 @@ class MainWindow(QMainWindow):
         else:
             self.paper_radio.setChecked(True)
         self._load_strategy_settings()
+        self._load_universe_settings()
         self._apply_mode_enable()
         self._save_current_settings()
 
@@ -629,6 +660,26 @@ class MainWindow(QMainWindow):
             self.max_pos_input.blockSignals(False)
         self._apply_parameters_from_controls()
 
+    def _load_universe_settings(self) -> None:
+        prefix = "universe/"
+        trigger = self.settings.value(prefix + "trigger", "")
+        today_raw = self.settings.value(prefix + "today_candidates", "") or ""
+        today_candidates = [x for x in str(today_raw).split(",") if x]
+        gate = self.settings.value(prefix + "gate_after_trigger", False, type=bool)
+        premarket = self.settings.value(prefix + "allow_premarket", True, type=bool)
+        rebuy = self.settings.value(prefix + "rebuy_after_sell", False, type=bool)
+        max_buy = self.settings.value(prefix + "max_buy_per_symbol_today", 1)
+        try:
+            max_buy = int(max_buy)
+        except Exception:
+            max_buy = 1
+        self.gate_after_trigger_checkbox.setChecked(bool(gate))
+        self.allow_premarket_monitor_checkbox.setChecked(bool(premarket))
+        self.rebuy_after_sell_checkbox.setChecked(bool(rebuy))
+        self.max_buy_per_symbol_spin.setValue(max_buy)
+        self._restore_condition_choices(trigger, today_candidates)
+        self._on_buy_limit_changed()
+
     def _save_current_settings(self) -> None:
         mode = self._settings_mode()
         prefix = f"strategy/{mode}/"
@@ -641,6 +692,19 @@ class MainWindow(QMainWindow):
         self.settings.setValue(prefix + "eod_time", self.eod_time_edit.time().toString("HH:mm"))
         if mode == "real":
             self.settings.setValue("connection/real/account_no", self.account_combo.currentText())
+        # universe / gating
+        uni_prefix = "universe/"
+        self.settings.setValue(uni_prefix + "trigger", self.trigger_combo.currentData())
+        selected_today = [
+            item.data(Qt.UserRole)
+            for i in range(self.today_candidate_list.count())
+            if (item := self.today_candidate_list.item(i)).checkState() == Qt.Checked
+        ]
+        self.settings.setValue(uni_prefix + "today_candidates", ",".join([s for s in selected_today if s]))
+        self.settings.setValue(uni_prefix + "gate_after_trigger", self.gate_after_trigger_checkbox.isChecked())
+        self.settings.setValue(uni_prefix + "allow_premarket", self.allow_premarket_monitor_checkbox.isChecked())
+        self.settings.setValue(uni_prefix + "rebuy_after_sell", self.rebuy_after_sell_checkbox.isChecked())
+        self.settings.setValue(uni_prefix + "max_buy_per_symbol_today", self.max_buy_per_symbol_spin.value())
         self.settings.sync()
 
     def _apply_mode_enable(self) -> None:
@@ -704,6 +768,13 @@ class MainWindow(QMainWindow):
             return
         self._log("[주문] 실주문 활성화됨 — 장시간/서버 검증 후에만 SendOrder 호출")
 
+    def _on_buy_limit_changed(self) -> None:
+        self.engine.set_buy_limits(
+            rebuy_after_sell_today=self.rebuy_after_sell_checkbox.isChecked(),
+            max_buy_per_symbol_today=self.max_buy_per_symbol_spin.value(),
+        )
+        self._save_current_settings()
+
     def on_open_config(self) -> None:
         dialog = ConfigDialog(self, self.current_config, self.kiwoom_client, self.settings, self._settings_mode())
         if dialog.exec_() == QDialog.Accepted and dialog.result_config:
@@ -760,8 +831,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str, str, int, str)
     def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
         codes = [code for code in str(code_list).split(";") if code]
-        if condition_name not in self.condition_manager.condition_sets:
-            active = list(self.condition_manager.condition_sets.keys())
+        if condition_name not in self.condition_manager.condition_sets_rt:
+            active = list(self.condition_manager.condition_sets_rt.keys())
             self._log(
                 f"[조건][WARN] 수신된 조건({condition_name})이 활성 목록에 없습니다. active={active}"
             )
@@ -774,7 +845,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
-        if condition_name not in self.condition_manager.condition_sets:
+        if condition_name not in self.condition_manager.condition_sets_rt:
             return
         self.condition_manager.apply_event(condition_name, code, event)
         action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
@@ -785,17 +856,8 @@ class MainWindow(QMainWindow):
         self._recompute_universe()
 
     def _recompute_universe(self) -> None:
-        final_set, postfix = self.condition_manager.evaluate()
-        counts = self.condition_manager.counts()
-        postfix_txt = self.condition_manager.postfix_text(postfix)
-        infix = self.condition_manager.render_infix()
-        self.condition_universe = set(final_set)
+        final_set = self._evaluate_universe(log_prefix="EVAL")
         self.engine.set_external_universe(list(final_set))
-        sample = list(final_set)[:10]
-        self._log(f"[EXPR] infix={infix} | postfix={postfix_txt}")
-        self._log(
-            f"[EVAL] cond_counts={counts} final candidates={len(final_set)} sample={sample}"
-        )
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
             openapi.set_real_reg(list(final_set))
@@ -871,6 +933,16 @@ class MainWindow(QMainWindow):
                 if data:
                     selections.append(data)
         return selections
+
+    def _selected_today_candidates(self) -> list[str]:
+        names: list[str] = []
+        for i in range(self.today_candidate_list.count()):
+            item = self.today_candidate_list.item(i)
+            if item.checkState() == Qt.Checked:
+                data = item.data(Qt.UserRole)
+                if data:
+                    names.append(str(data))
+        return names
 
     def _selected_condition_names(self) -> list[str]:
         return [name for _idx, name in self._selected_conditions()]
@@ -1069,18 +1141,54 @@ class MainWindow(QMainWindow):
     def _update_group_preview(self) -> None:
         self.group_preview_label.setText(self._group_preview_text())
 
+    def _evaluate_universe(self, log_prefix: str = "EVAL") -> set[str]:
+        # Evaluate RT expression
+        self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=False)
+        rt_set, postfix = self.condition_manager.evaluate(source="rt")
+        postfix_txt = self.condition_manager.postfix_text(postfix)
+        infix = self.condition_manager.render_infix(self.builder_tokens)
+
+        # Today cumulative buckets
+        today_names = self._selected_today_candidates()
+        today_union: set[str] = set()
+        today_counts = {}
+        for name in today_names:
+            bucket = self.condition_manager.get_bucket(name, source="today")
+            today_union |= bucket
+            today_counts[name] = len(bucket)
+
+        trigger_name = self.trigger_combo.currentData()
+        trigger_hits = self.condition_manager.get_bucket(trigger_name, source="today") if trigger_name else set()
+        gate_on = self.gate_after_trigger_checkbox.isChecked()
+        gate_ok = True
+        gate_reason = ""
+        if gate_on and trigger_name and not trigger_hits:
+            gate_ok = False
+            gate_reason = "gate_not_satisfied"
+        final_set = set(rt_set)
+        if today_union and gate_ok:
+            final_set |= today_union
+        self.condition_universe_today = today_union if gate_ok else set()
+        self.condition_universe = final_set
+        rt_counts = self.condition_manager.counts()
+        self._log(
+            f"[{log_prefix}] infix={infix} postfix={postfix_txt} rt_count={len(rt_set)} rt_counts={rt_counts} today_union={len(today_union)} gate_on={gate_on} gate_ok={gate_ok} gate_reason={gate_reason} final={len(final_set)}"
+        )
+        if not final_set:
+            reason = gate_reason or "expression_result_empty"
+            if not rt_set and not today_union:
+                reason = "no_condition_data"
+            self._log(
+                f"[유니버스] condition_universe empty reason={reason} trigger_seen={len(trigger_hits)}>0 today_union={len(today_union)}"
+            )
+        return final_set
+
     def _preview_candidates(self) -> None:
         if not self._validate_builder():
             return
-        self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=False)
-        final_set, postfix = self.condition_manager.evaluate()
-        cond_counts = self.condition_manager.counts()
-        infix = self.condition_manager.render_infix(self.builder_tokens)
-        postfix_txt = self.condition_manager.postfix_text(postfix)
+        final_set = self._evaluate_universe(log_prefix="EVAL")
         sample = list(final_set)[:10]
-        self._log(
-            f"[EVAL] infix={infix} | postfix={postfix_txt} | cond_counts={cond_counts} | candidates={len(final_set)} sample={sample}"
-        )
+        self._log(f"[EVAL] candidates={len(final_set)} sample={sample}")
         self._update_group_preview()
 
     def _execute_condition(self) -> None:
@@ -1136,6 +1244,7 @@ class MainWindow(QMainWindow):
 
         self._log(f"[GROUP] expression configured: {self._group_preview_text()}")
         self._log("[GROUP] evaluation rule: expression-based (AND>OR precedence)")
+        self._evaluate_universe(log_prefix="EVAL")
 
     def on_apply_strategy(self) -> None:
         params = dict(
@@ -1240,6 +1349,7 @@ class MainWindow(QMainWindow):
         if self.eod_executed_today == datetime.date.today():
             return
         open_flag, reason, now = self._market_state()
+        allow_orders = True
         if self.enforce_market_hours and not open_flag:
             if self.trading_orders_enabled or not self.auto_trading_armed:
                 self.trading_orders_enabled = False
@@ -1249,7 +1359,12 @@ class MainWindow(QMainWindow):
                 )
             self._log_market_guard(reason, now)
             self._refresh_positions(market_open=False)
-            return
+            if not self.allow_premarket_monitor_checkbox.isChecked():
+                return
+            allow_orders = False
+            self._log(
+                f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
+            )
         # 장중 전환 감지
         if self.auto_trading_armed or not self.trading_orders_enabled:
             self.trading_orders_enabled = True
@@ -1269,7 +1384,8 @@ class MainWindow(QMainWindow):
             f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
         )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        allow_orders = self.trading_orders_enabled
+        if not (self.trading_orders_enabled and open_flag):
+            allow_orders = False
         if not allow_orders:
             self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
         self.engine.run_once("combined", allow_orders=allow_orders)
@@ -1307,6 +1423,22 @@ class MainWindow(QMainWindow):
         if (now - self._last_market_log).total_seconds() >= 60:
             self._last_market_log = now
             self._log(f"[장시간] {reason} (지속)")
+
+    def _restore_condition_choices(self, trigger_name: str, today_candidates: list[str]) -> None:
+        self._pending_trigger_name = trigger_name or ""
+        self._pending_today_candidates = today_candidates or []
+        # trigger
+        for i in range(self.trigger_combo.count()):
+            data = self.trigger_combo.itemData(i)
+            if data == self._pending_trigger_name:
+                self.trigger_combo.setCurrentIndex(i)
+                break
+        # today candidates
+        names = set(self._pending_today_candidates)
+        for i in range(self.today_candidate_list.count()):
+            item = self.today_candidate_list.item(i)
+            data = item.data(Qt.UserRole)
+            item.setCheckState(Qt.Checked if data in names else Qt.Unchecked)
 
     def _on_eod_check(self) -> None:
         if not self.eod_checkbox.isChecked():
@@ -1498,6 +1630,9 @@ class MainWindow(QMainWindow):
         self._log(f"[COND] loaded {raw_count} conditions head=[{preview_head}] tail=[{preview_tail}]")
 
         self.condition_list.clear()
+        self.trigger_combo.clear()
+        self.trigger_combo.addItem("(사용 안 함)", "")
+        self.today_candidate_list.clear()
         self.condition_map.clear()
         self.all_conditions = [(int(idx), name) for idx, name in conditions]
         for idx, name in self.all_conditions:
@@ -1506,6 +1641,18 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.Unchecked)
             self.condition_list.addItem(item)
             self.condition_map[name] = (idx, name)
+            self.trigger_combo.addItem(f"{idx}: {name}", name)
+            cand_item = QListWidgetItem(f"{idx}: {name}")
+            cand_item.setData(Qt.UserRole, name)
+            cand_item.setCheckState(Qt.Unchecked)
+            self.today_candidate_list.addItem(cand_item)
+
+        if not self._pending_trigger_name:
+            self._pending_trigger_name = str(self.settings.value("universe/trigger", "") or "")
+        if not self._pending_today_candidates:
+            raw_today = self.settings.value("universe/today_candidates", "") or ""
+            self._pending_today_candidates = [x for x in str(raw_today).split(",") if x]
+        self._restore_condition_choices(self._pending_trigger_name, self._pending_today_candidates)
 
         valid_names = {name for _, name in self.all_conditions}
         pruned = False

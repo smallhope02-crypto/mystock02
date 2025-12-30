@@ -1,7 +1,9 @@
 """Trade engine coordinating selector, strategy, and broker layers."""
 
+import datetime
 import logging
-from typing import Callable, List, Optional, Sequence
+from zoneinfo import ZoneInfo
+from typing import Callable, Dict, List, Optional, Sequence
 
 from .config import AppConfig
 from .kiwoom_client import KiwoomClient
@@ -30,6 +32,11 @@ class TradeEngine:
         self.kiwoom_client = kiwoom_client or KiwoomClient(account_no="00000000")
         self.paper_broker = paper_broker or PaperBroker(initial_cash=self.strategy.initial_cash)
         self.log_fn = log_fn
+        self.rebuy_after_sell_today: bool = False
+        self.max_buy_per_symbol_today: int = 1
+        self.bought_today_symbols: set[str] = set()
+        self.buy_count_today: Dict[str, int] = {}
+        self._today: datetime.date | None = None
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 
@@ -42,6 +49,10 @@ class TradeEngine:
         self.paper_broker.set_cash(cash)
         self.strategy.update_parameters(initial_cash=cash)
         self.strategy.positions.clear()
+
+    def set_buy_limits(self, rebuy_after_sell_today: bool, max_buy_per_symbol_today: int) -> None:
+        self.rebuy_after_sell_today = bool(rebuy_after_sell_today)
+        self.max_buy_per_symbol_today = int(max_buy_per_symbol_today)
 
     def update_credentials(self, config: AppConfig) -> None:
         """Forward updated Kiwoom credentials to the client."""
@@ -74,8 +85,9 @@ class TradeEngine:
             inadvertent SendOrder calls.
         """
 
+        self._reset_daily_if_needed()
         self.strategy.cash = self._current_cash()
-        universe = self.selector.select(condition_name)
+        universe = [s for s in self.selector.select(condition_name) if self._can_buy(s)]
 
         exit_orders = self.strategy.evaluate_exit(self._active_price_lookup)
         self._execute_orders(exit_orders, allow_orders=allow_orders)
@@ -110,6 +122,8 @@ class TradeEngine:
                 )
                 if broker_result.status == "accepted" and broker_result.quantity:
                     self.strategy.register_fill(order, broker_result.quantity, broker_result.price)
+                    if order.side == "buy":
+                        self._record_buy_fill(order.symbol)
                 logger.info(
                     "Executed %s %s x%d at %.2f (%s)",
                     order.side,
@@ -134,6 +148,8 @@ class TradeEngine:
             filled_qty = getattr(result, "quantity", 0)
             fill_price = getattr(result, "price", order.price)
             self.strategy.register_fill(order, filled_qty, fill_price, update_cash=False)
+            if order.side == "buy" and filled_qty > 0:
+                self._record_buy_fill(order.symbol)
             logger.info(
                 "Executed %s %s x%d at %.2f (%s)", order.side, order.symbol, filled_qty, fill_price, result.status
             )
@@ -146,6 +162,37 @@ class TradeEngine:
         if self.broker_mode == "real":
             return float(self.kiwoom_client.get_real_balance())
         return float(self.paper_broker.cash)
+
+    def _reset_daily_if_needed(self) -> None:
+        today = datetime.datetime.now(ZoneInfo("Asia/Seoul")).date()
+        if self._today != today:
+            self._today = today
+            self.bought_today_symbols.clear()
+            self.buy_count_today.clear()
+
+    def _record_buy_fill(self, symbol: str) -> None:
+        self._reset_daily_if_needed()
+        self.bought_today_symbols.add(symbol)
+        self.buy_count_today[symbol] = self.buy_count_today.get(symbol, 0) + 1
+
+    def _can_buy(self, symbol: str) -> bool:
+        if symbol in self.strategy.positions:
+            if self.log_fn:
+                self.log_fn(f"[BUY] skip {symbol}: already_holding")
+            return False
+        self._reset_daily_if_needed()
+        if not self.rebuy_after_sell_today and symbol in self.bought_today_symbols:
+            if self.log_fn:
+                self.log_fn(f"[BUY] skip {symbol}: bought_today and rebuy disabled")
+            return False
+        max_n = self.max_buy_per_symbol_today
+        if max_n > 0:
+            count = self.buy_count_today.get(symbol, 0)
+            if count >= max_n:
+                if self.log_fn:
+                    self.log_fn(f"[BUY] skip {symbol}: max_buy_count_reached({count}/{max_n})")
+                return False
+        return True
 
     def account_summary(self):
         if self.broker_mode == "real":

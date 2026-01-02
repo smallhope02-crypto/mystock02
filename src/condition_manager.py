@@ -2,8 +2,27 @@
 from __future__ import annotations
 
 import datetime
-from zoneinfo import ZoneInfo
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
+
+try:  # tzdata may be absent on some Windows setups
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback for minimal environments
+    ZoneInfo = None  # type: ignore
+
+
+def _get_kst_timezone() -> datetime.tzinfo:
+    """Return Asia/Seoul if available, otherwise a fixed UTC+9 offset.
+
+    tzdata is not always present on Windows; falling back avoids
+    ZoneInfoNotFoundError while keeping KST semantics for day rollovers.
+    """
+
+    if ZoneInfo:
+        try:
+            return ZoneInfo("Asia/Seoul")
+        except Exception:
+            pass
+    return datetime.timezone(datetime.timedelta(hours=9))
 
 
 Token = Dict[str, str]
@@ -24,6 +43,7 @@ class ConditionManager:
         self.condition_sets_today: Dict[str, Set[str]] = {}
         self.tokens: List[Token] = []
         self._today: datetime.date | None = None
+        self._tz = _get_kst_timezone()
 
     # ------------------------------------------------------------------
     def set_expression_tokens(self, tokens: Sequence[Token], reset_sets: bool = False) -> None:
@@ -52,7 +72,7 @@ class ConditionManager:
             self.condition_sets_today[key] = set()
 
     def _ensure_today(self, now: datetime.datetime | None = None) -> None:
-        now = now or datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+        now = now or datetime.datetime.now(self._tz)
         if self._today != now.date():
             self._today = now.date()
             for key in list(self.condition_sets_today.keys()):

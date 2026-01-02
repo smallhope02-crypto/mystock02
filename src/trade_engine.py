@@ -2,7 +2,10 @@
 
 import datetime
 import logging
-from zoneinfo import ZoneInfo
+try:  # tzdata optional on Windows
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 from typing import Callable, Dict, List, Optional, Sequence
 
 from .config import AppConfig
@@ -37,6 +40,7 @@ class TradeEngine:
         self.bought_today_symbols: set[str] = set()
         self.buy_count_today: Dict[str, int] = {}
         self._today: datetime.date | None = None
+        self._tz = self._get_kst_timezone()
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 
@@ -164,7 +168,7 @@ class TradeEngine:
         return float(self.paper_broker.cash)
 
     def _reset_daily_if_needed(self) -> None:
-        today = datetime.datetime.now(ZoneInfo("Asia/Seoul")).date()
+        today = datetime.datetime.now(self._tz).date()
         if self._today != today:
             self._today = today
             self.bought_today_symbols.clear()
@@ -218,3 +222,11 @@ class TradeEngine:
     # -- Price lookup --------------------------------------------------
     def get_current_price(self, symbol: str) -> float:
         return self._active_price_lookup(symbol)
+
+    def _get_kst_timezone(self) -> datetime.tzinfo:
+        if ZoneInfo:
+            try:
+                return ZoneInfo("Asia/Seoul")
+            except Exception:
+                pass
+        return datetime.timezone(datetime.timedelta(hours=9))

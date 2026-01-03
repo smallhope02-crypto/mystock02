@@ -4,25 +4,21 @@ from __future__ import annotations
 import datetime
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
-try:  # tzdata may be absent on some Windows setups
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover - fallback for minimal environments
-    ZoneInfo = None  # type: ignore
-
 
 def _get_kst_timezone() -> datetime.tzinfo:
     """Return Asia/Seoul if available, otherwise a fixed UTC+9 offset.
 
-    tzdata is not always present on Windows; falling back avoids
-    ZoneInfoNotFoundError while keeping KST semantics for day rollovers.
+    Some Windows installs lack ``tzdata`` so ``ZoneInfo('Asia/Seoul')``
+    raises ``ZoneInfoNotFoundError``. Import and fallback locally to keep
+    crashes away while still using KST semantics for day rollovers.
     """
 
-    if ZoneInfo:
-        try:
-            return ZoneInfo("Asia/Seoul")
-        except Exception:
-            pass
-    return datetime.timezone(datetime.timedelta(hours=9))
+    try:
+        from zoneinfo import ZoneInfo  # type: ignore
+
+        return ZoneInfo("Asia/Seoul")
+    except Exception:  # pragma: no cover - fallback when tzdata is missing
+        return datetime.timezone(datetime.timedelta(hours=9))
 
 
 Token = Dict[str, str]

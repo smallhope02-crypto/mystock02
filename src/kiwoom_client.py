@@ -243,7 +243,17 @@ class KiwoomClient:
             # 로그인 이벤트에서 조건 로딩을 시작하지만, 즉시 호출해도 안전하다.
             self.openapi.load_conditions()
 
-    def send_buy_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
+    def send_buy_order(
+        self, symbol: str, quantity: int, price: float, hogagb: str = "00", expected_price: float | None = None
+    ) -> OrderResult:
+        """Send a buy order through OpenAPI.
+
+        ``hogagb`` supports ``"03"`` for market and ``"00"`` for limit. ``price``
+        should be 0 for market orders when calling the API, but ``expected_price``
+        is kept for reporting and strategy fills.
+        """
+
+        display_price = expected_price if expected_price is not None else price
         if self._can_send_real_order():
             ok = False
             if hasattr(self.openapi, "send_order"):
@@ -256,15 +266,15 @@ class KiwoomClient:
                         code=symbol,
                         qty=int(quantity),
                         price=int(price),
-                        hogagb="00",
+                        hogagb=hogagb,
                         org_order_no="",
                     )
                 )
             status = "accepted" if ok else "error"
-            logger.info("[REAL MODE] SendOrder buy dispatched=%s", ok)
-            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=price, status=status)
+            logger.info("[REAL MODE] SendOrder buy dispatched=%s hogagb=%s price=%s", ok, hogagb, price)
+            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=display_price, status=status)
         logger.warning("[REAL MODE] 주문 차단 (server/mock/login 확인 필요)")
-        return OrderResult(symbol=symbol, quantity=0, price=price, status="blocked")
+        return OrderResult(symbol=symbol, quantity=0, price=display_price, status="blocked")
 
     def send_sell_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
         if self._can_send_real_order():

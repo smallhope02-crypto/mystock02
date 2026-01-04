@@ -13,6 +13,7 @@ from .kiwoom_client import KiwoomClient
 from .paper_broker import PaperBroker
 from .selector import UniverseSelector
 from .strategy import Order, Strategy
+from .price_tick import shift_price_by_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class TradeEngine:
         self.buy_count_today: Dict[str, int] = {}
         self._today: datetime.date | None = None
         self._tz = self._get_kst_timezone()
+        self.buy_order_mode: str = "market"
+        self.buy_price_offset_ticks: int = 0
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 
@@ -53,6 +56,14 @@ class TradeEngine:
         self.paper_broker.set_cash(cash)
         self.strategy.update_parameters(initial_cash=cash)
         self.strategy.positions.clear()
+
+    def set_buy_pricing(self, mode: str, offset_ticks: int) -> None:
+        """Configure how entry prices are derived for new buys."""
+
+        if mode not in {"market", "limit"}:
+            raise ValueError("buy order mode must be 'market' or 'limit'")
+        self.buy_order_mode = mode
+        self.buy_price_offset_ticks = int(offset_ticks)
 
     def set_buy_limits(self, rebuy_after_sell_today: bool, max_buy_per_symbol_today: int) -> None:
         self.rebuy_after_sell_today = bool(rebuy_after_sell_today)
@@ -96,7 +107,7 @@ class TradeEngine:
         exit_orders = self.strategy.evaluate_exit(self._active_price_lookup)
         self._execute_orders(exit_orders, allow_orders=allow_orders)
 
-        entry_orders = self.strategy.evaluate_entry(universe, self._active_price_lookup)
+        entry_orders = self.strategy.evaluate_entry(universe, self._entry_price_lookup)
         self._execute_orders(entry_orders, allow_orders=allow_orders)
 
         # Keep strategy cash aligned to the active broker's view
@@ -119,11 +130,14 @@ class TradeEngine:
                 continue
             if self.broker_mode == "real":
                 logger.info("[주문] 실거래 모드 — SendOrder 호출 예정 (%s %s x%d)", order.side, order.symbol, order.quantity)
-                broker_result = (
-                    self.kiwoom_client.send_buy_order(order.symbol, order.quantity, order.price)
-                    if order.side == "buy"
-                    else self.kiwoom_client.send_sell_order(order.symbol, order.quantity, order.price)
-                )
+                if order.side == "buy":
+                    hogagb = "03" if self.buy_order_mode == "market" else "00"
+                    send_price = 0 if hogagb == "03" else order.price
+                    broker_result = self.kiwoom_client.send_buy_order(
+                        order.symbol, order.quantity, send_price, hogagb=hogagb, expected_price=order.price
+                    )
+                else:
+                    broker_result = self.kiwoom_client.send_sell_order(order.symbol, order.quantity, order.price)
                 if broker_result.status == "accepted" and broker_result.quantity:
                     self.strategy.register_fill(order, broker_result.quantity, broker_result.price)
                     if order.side == "buy":
@@ -230,3 +244,12 @@ class TradeEngine:
             except Exception:
                 pass
         return datetime.timezone(datetime.timedelta(hours=9))
+
+    # -- Pricing helpers -----------------------------------------------
+    def _entry_price_lookup(self, symbol: str) -> float:
+        """Return the entry price adjusted for the configured buy mode."""
+
+        base = self._active_price_lookup(symbol)
+        if self.buy_order_mode == "limit":
+            return float(shift_price_by_ticks(base, self.buy_price_offset_ticks))
+        return base

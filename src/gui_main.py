@@ -1,6 +1,7 @@
 """PyQt5 GUI for the Mystock02 auto-trading playground."""
 
 import datetime
+import json
 import logging
 import sys
 from typing import List, Optional, Sequence
@@ -250,6 +251,8 @@ class MainWindow(QMainWindow):
         self._last_market_reason: str = ""
         self._pending_trigger_name: str = ""
         self._pending_today_candidates: list[str] = []
+        self._pending_preset_state: Optional[dict] = None
+        self._pending_preset_name: str = str(self.settings.value("builder/last_preset", "") or "")
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -262,6 +265,7 @@ class MainWindow(QMainWindow):
         self.eod_executed_today: Optional[datetime.date] = None
 
         self._build_layout()
+        self._load_preset_list()
         self._connect_signals()
         if getattr(self.kiwoom_client, "openapi", None):
             print(
@@ -393,6 +397,17 @@ class MainWindow(QMainWindow):
         # Expression builder strip
         right_panel = QVBoxLayout()
         right_panel.addWidget(QLabel("조건 표현식 편집 (0150 스타일: 숫자/AND/OR/괄호)"))
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("프리셋"))
+        self.preset_combo = QComboBox()
+        self.preset_save_btn = QPushButton("저장")
+        self.preset_load_btn = QPushButton("불러오기")
+        self.preset_delete_btn = QPushButton("삭제")
+        preset_row.addWidget(self.preset_combo)
+        preset_row.addWidget(self.preset_save_btn)
+        preset_row.addWidget(self.preset_load_btn)
+        preset_row.addWidget(self.preset_delete_btn)
+        right_panel.addLayout(preset_row)
         self.builder_strip = QListWidget()
         self.builder_strip.setSelectionMode(QListWidget.ExtendedSelection)
         self.builder_strip.setMinimumHeight(140)
@@ -454,6 +469,14 @@ class MainWindow(QMainWindow):
         self.max_pos_input.setRange(1, 50)
         self.max_pos_input.setValue(self.strategy.max_positions)
 
+        self.buy_order_mode_combo = QComboBox()
+        self.buy_order_mode_combo.addItem("시장가(즉시체결)", "market")
+        self.buy_order_mode_combo.addItem("지정가(호가이동)", "limit")
+        self.buy_price_offset_ticks = QSpinBox()
+        self.buy_price_offset_ticks.setRange(-50, 50)
+        self.buy_price_offset_ticks.setValue(0)
+        self.buy_price_offset_ticks.setSuffix(" 틱")
+
         self.apply_btn = QPushButton("전략 적용")
         self.apply_btn.setToolTip(
             "입력한 손절/트레일링/시간제한/최대 종목 수/모의 예수금을 전략에 반영만 합니다. 주문은 발생하지 않습니다."
@@ -480,6 +503,8 @@ class MainWindow(QMainWindow):
         param_layout.addRow("트레일링 스탑", self.trailing_input)
         param_layout.addRow("보유 시간 제한", self.time_limit_input)
         param_layout.addRow("최대 보유 종목 수", self.max_pos_input)
+        param_layout.addRow("매수 주문 방식", self.buy_order_mode_combo)
+        param_layout.addRow("매수 호가 이동(틱)", self.buy_price_offset_ticks)
         param_layout.addRow(self.eod_checkbox, self.eod_time_edit)
         self.rebuy_after_sell_checkbox = QCheckBox("오늘 매수 종목 매도 후 재매수 허용")
         self.max_buy_per_symbol_spin = QSpinBox()
@@ -521,10 +546,12 @@ class MainWindow(QMainWindow):
             self.trailing_input,
             self.time_limit_input,
             self.max_pos_input,
+            self.buy_price_offset_ticks,
         ):
             widget.valueChanged.connect(self._mark_dirty)
             widget.valueChanged.connect(lambda _=None: self._save_current_settings())
         self.paper_cash_input.valueChanged.connect(self._save_current_settings)
+        self.buy_order_mode_combo.currentIndexChanged.connect(self._on_buy_order_mode_changed)
 
         self.apply_btn.clicked.connect(self.on_apply_strategy)
         self.test_btn.clicked.connect(self.on_run_once)
@@ -539,6 +566,9 @@ class MainWindow(QMainWindow):
         self.wrap_btn.clicked.connect(self._wrap_selection)
         self.validate_btn.clicked.connect(self._validate_builder)
         self.clear_builder_btn.clicked.connect(self._clear_builder)
+        self.preset_save_btn.clicked.connect(self._on_save_preset)
+        self.preset_load_btn.clicked.connect(self._on_load_preset)
+        self.preset_delete_btn.clicked.connect(self._on_delete_preset)
         self.trigger_combo.currentIndexChanged.connect(self._save_current_settings)
         self.today_candidate_list.itemChanged.connect(lambda *_: self._save_current_settings())
         self.gate_after_trigger_checkbox.toggled.connect(self._save_current_settings)
@@ -644,12 +674,20 @@ class MainWindow(QMainWindow):
         self.trailing_input.blockSignals(True)
         self.paper_cash_input.blockSignals(True)
         self.max_pos_input.blockSignals(True)
+        self.buy_order_mode_combo.blockSignals(True)
+        self.buy_price_offset_ticks.blockSignals(True)
         try:
             self.stop_loss_input.setValue(stop)
             self.take_profit_input.setValue(take)
             self.trailing_input.setValue(trail)
             self.paper_cash_input.setValue(paper_cash)
             self.max_pos_input.setValue(max_pos)
+            mode_val = self.settings.value(mode_prefix + "buy_order_mode", "market")
+            offset_val = geti("buy_offset_ticks", 0)
+            idx = self.buy_order_mode_combo.findData(mode_val)
+            if idx >= 0:
+                self.buy_order_mode_combo.setCurrentIndex(idx)
+            self.buy_price_offset_ticks.setValue(offset_val)
             try:
                 h, m = map(int, str(eod_time).split(":"))
                 self.eod_time_edit.setTime(datetime.time(h, m))
@@ -661,6 +699,9 @@ class MainWindow(QMainWindow):
             self.trailing_input.blockSignals(False)
             self.paper_cash_input.blockSignals(False)
             self.max_pos_input.blockSignals(False)
+            self.buy_order_mode_combo.blockSignals(False)
+            self.buy_price_offset_ticks.blockSignals(False)
+        self.buy_price_offset_ticks.setEnabled(self.buy_order_mode_combo.currentData() == "limit")
         self._apply_parameters_from_controls()
 
     def _load_universe_settings(self) -> None:
@@ -692,6 +733,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue(prefix + "trailing_pct", self.trailing_input.value())
         self.settings.setValue(prefix + "paper_cash", self.paper_cash_input.value())
         self.settings.setValue(prefix + "max_positions", self.max_pos_input.value())
+        self.settings.setValue(prefix + "buy_order_mode", self.buy_order_mode_combo.currentData())
+        self.settings.setValue(prefix + "buy_offset_ticks", self.buy_price_offset_ticks.value())
         self.settings.setValue(prefix + "eod_time", self.eod_time_edit.time().toString("HH:mm"))
         if mode == "real":
             self.settings.setValue("connection/real/account_no", self.account_combo.currentText())
@@ -729,6 +772,12 @@ class MainWindow(QMainWindow):
         )
         self.strategy.update_parameters(**params)
         self.engine.set_paper_cash(self.paper_cash_input.value())
+        self._apply_pricing_params()
+
+    def _apply_pricing_params(self) -> None:
+        mode = self.buy_order_mode_combo.currentData()
+        offset = self.buy_price_offset_ticks.value()
+        self.engine.set_buy_pricing(mode, offset)
 
     def _update_server_label(self, gubun: str) -> None:
         text = f"서버: 알 수 없음(raw={gubun})"
@@ -776,6 +825,13 @@ class MainWindow(QMainWindow):
             rebuy_after_sell_today=self.rebuy_after_sell_checkbox.isChecked(),
             max_buy_per_symbol_today=self.max_buy_per_symbol_spin.value(),
         )
+        self._save_current_settings()
+
+    def _on_buy_order_mode_changed(self) -> None:
+        mode = self.buy_order_mode_combo.currentData()
+        offset = self.buy_price_offset_ticks.value()
+        self.buy_price_offset_ticks.setEnabled(mode == "limit")
+        self.engine.set_buy_pricing(mode, offset)
         self._save_current_settings()
 
     def on_open_config(self) -> None:
@@ -969,6 +1025,148 @@ class MainWindow(QMainWindow):
     def _builder_log_tokens(self) -> None:
         pretty = self.condition_manager.render_infix(self.builder_tokens)
         self._log(f"[BUILDER] tokens: {pretty if pretty else '(empty)'}")
+
+    # Preset helpers ----------------------------------------------------
+    def _preset_names(self) -> list[str]:
+        names = self.settings.value("builder/presets", []) or []
+        if isinstance(names, str):
+            names = [names]
+        return [str(n) for n in names]
+
+    def _load_preset_list(self) -> None:
+        names = self._preset_names()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        for name in names:
+            self.preset_combo.addItem(name)
+        if self._pending_preset_name and self._pending_preset_name in names:
+            self.preset_combo.setCurrentText(self._pending_preset_name)
+        self.preset_combo.blockSignals(False)
+        if self._pending_preset_name and not self._pending_preset_state:
+            raw = self.settings.value(f"builder/preset/{self._pending_preset_name}", "")
+            if raw:
+                try:
+                    state = json.loads(raw)
+                    if self.condition_list.count() == 0:
+                        self._pending_preset_state = state
+                    else:
+                        self._apply_preset_state(state, name=self._pending_preset_name)
+                except Exception:
+                    self._log(f"[프리셋][WARN] '{self._pending_preset_name}' 자동 적용 실패(JSON)")
+
+    def _serialize_preset_state(self) -> dict:
+        return {
+            "checked_conditions": self._selected_condition_names(),
+            "trigger": self.trigger_combo.currentData(),
+            "today_candidates": self._selected_today_candidates(),
+            "gate_after_trigger": self.gate_after_trigger_checkbox.isChecked(),
+            "allow_premarket": self.allow_premarket_monitor_checkbox.isChecked(),
+            "builder_tokens": self.builder_tokens,
+        }
+
+    def _apply_preset_state(self, state: dict, name: str | None = None) -> None:
+        if self.condition_list.count() == 0:
+            self._pending_preset_state = state
+            self._pending_preset_name = name or self._pending_preset_name
+            self._log("[프리셋] 조건 목록이 아직 없습니다. 새로고침 후 자동 적용합니다.")
+            return
+        checked = set(state.get("checked_conditions", []))
+        for i in range(self.condition_list.count()):
+            item = self.condition_list.item(i)
+            data = item.data(Qt.UserRole)
+            name_val = data[1] if data else ""
+            item.setCheckState(Qt.Checked if name_val in checked else Qt.Unchecked)
+        trigger_val = state.get("trigger", "")
+        idx = self.trigger_combo.findData(trigger_val)
+        if idx >= 0:
+            self.trigger_combo.setCurrentIndex(idx)
+        today_set = set(state.get("today_candidates", []))
+        for i in range(self.today_candidate_list.count()):
+            item = self.today_candidate_list.item(i)
+            data = item.data(Qt.UserRole)
+            item.setCheckState(Qt.Checked if data in today_set else Qt.Unchecked)
+        self.gate_after_trigger_checkbox.setChecked(bool(state.get("gate_after_trigger", False)))
+        self.allow_premarket_monitor_checkbox.setChecked(bool(state.get("allow_premarket", True)))
+        tokens = state.get("builder_tokens", []) or []
+        if isinstance(tokens, list):
+            self.builder_tokens = list(tokens)
+            self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=True)
+            self._refresh_builder_strip()
+        if name:
+            self.settings.setValue("builder/last_preset", name)
+            self.settings.sync()
+
+    def _on_save_preset(self) -> None:
+        names = self._preset_names()
+        default_name = self.preset_combo.currentText() or "preset1"
+        name, ok = QInputDialog.getText(self, "프리셋 이름", "저장할 프리셋 이름:", text=default_name)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in names:
+            confirm = QMessageBox.question(
+                self,
+                "덮어쓰기 확인",
+                f"이미 존재하는 프리셋 '{name}' 를 덮어쓸까요?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+        state = self._serialize_preset_state()
+        try:
+            payload = json.dumps(state, ensure_ascii=False)
+            self.settings.setValue(f"builder/preset/{name}", payload)
+            updated = [n for n in names if n != name] + [name]
+            self.settings.setValue("builder/presets", updated)
+            self.settings.setValue("builder/last_preset", name)
+            self.settings.sync()
+            self._pending_preset_name = name
+            self._load_preset_list()
+            self._log(f"[프리셋] '{name}' 저장 완료")
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log(f"[프리셋][ERROR] 저장 실패: {exc}")
+
+    def _on_load_preset(self) -> None:
+        name = self.preset_combo.currentText().strip()
+        if not name:
+            self._log("[프리셋] 불러올 항목을 선택하세요.")
+            return
+        raw = self.settings.value(f"builder/preset/{name}", "")
+        if not raw:
+            self._log(f"[프리셋] '{name}' 데이터를 찾을 수 없습니다.")
+            return
+        try:
+            state = json.loads(raw)
+        except Exception as exc:  # pragma: no cover - user data
+            self._log(f"[프리셋][ERROR] JSON 파싱 실패({name}): {exc}")
+            return
+        self._pending_preset_state = None
+        self._pending_preset_name = name
+        self._apply_preset_state(state, name=name)
+        self._log(f"[프리셋] '{name}' 적용 완료")
+
+    def _on_delete_preset(self) -> None:
+        name = self.preset_combo.currentText().strip()
+        if not name:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "프리셋 삭제",
+            f"'{name}' 프리셋을 삭제할까요?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        names = [n for n in self._preset_names() if n != name]
+        self.settings.remove(f"builder/preset/{name}")
+        self.settings.setValue("builder/presets", names)
+        if self.settings.value("builder/last_preset", "") == name:
+            self.settings.setValue("builder/last_preset", "")
+        self.settings.sync()
+        self._load_preset_list()
+        self._log(f"[프리셋] '{name}' 삭제")
 
     def _refresh_builder_strip(self) -> None:
         self.builder_strip.blockSignals(True)
@@ -1696,6 +1894,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log(f"[ERR] refresh_condition_list update failed: {exc}")
             logger.exception("Failed to refresh condition expression after reload")
+        if self._pending_preset_state:
+            self._apply_preset_state(self._pending_preset_state, name=self._pending_preset_name)
+            self._pending_preset_state = None
 
     def _log(self, message: str) -> None:
         self.log_view.append(message)

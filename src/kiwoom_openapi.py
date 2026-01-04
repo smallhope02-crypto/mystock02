@@ -46,6 +46,7 @@ class _DisabledOpenAPI:
         self.ax = None
         self.last_prices: dict[str, float] = {}
         self.real_data_received = None
+        self._pw_window_shown: bool = False
         if _QAX_IMPORT_ERROR:
             print(f"[OpenAPI] QAx unavailable: {_QAX_IMPORT_ERROR}")
         self.accounts = []
@@ -114,7 +115,12 @@ class _DisabledOpenAPI:
     def request_balance(self, account_no: str, rqname: str = "opw00001-balance") -> None:
         return None
 
-    def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
+    def request_deposit_and_holdings(self, account_no: str, account_pw: str | None = None) -> bool:
+        print("[OpenAPI-disabled] 잔고 조회는 QAx 환경에서만 지원됩니다")
+        return False
+
+    def show_account_password_window(self) -> bool:
+        print("[OpenAPI-disabled] ShowAccountWindow는 QAx 환경에서만 지원됩니다")
         return False
 
     def get_server_gubun(self) -> str:
@@ -188,6 +194,7 @@ else:
             self.accounts: List[str] = []
             self.server_gubun: str = ""
             self.last_prices: dict[str, float] = {}
+            self._pw_window_shown: bool = False
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -241,6 +248,7 @@ else:
                 "OnReceiveTrData": self._on_receive_tr_data,
                 "OnReceiveRealData": self._on_receive_real_data,
                 "OnReceiveChejanData": self._on_receive_chejan_data,
+                "OnReceiveMsg": self._on_receive_msg,
             }
 
             for name, handler in bindings.items():
@@ -656,25 +664,57 @@ else:
         def get_last_price(self, code: str) -> float:
             return float(self.last_prices.get(code, 0))
 
-        def request_deposit_and_holdings(self, account_no: str, account_pw: str) -> bool:
-            """Request deposit (opw00001) and holdings (opw00018)."""
+        def show_account_password_window(self) -> bool:
+            """Open Kiwoom's account password window (ShowAccountWindow)."""
+
+            if not self.is_enabled() or not (self.ax and hasattr(self.ax, "dynamicCall")):
+                print("[OpenAPI] 계좌 비밀번호 창을 열 수 없습니다(ax 미활성)")
+                return False
+            if self._pw_window_shown:
+                print("[OpenAPI] 계좌 비밀번호 창은 이미 한 번 열었습니다(세션 기준).")
+                return False
+            try:
+                self.ax.dynamicCall("KOA_Functions(QString, QString)", "ShowAccountWindow", "")
+                self._pw_window_shown = True
+                print("[OpenAPI] 계좌비밀번호 입력창을 호출했습니다.")
+                return True
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                print(f"[OpenAPI] ShowAccountWindow 호출 실패: {exc}")
+                traceback.print_exc()
+                self._pw_window_shown = False
+                return False
+
+        def request_deposit_and_holdings(self, account_no: str, account_pw: str | None = None) -> bool:
+            """Request deposit (opw00001) and holdings (opw00018).
+
+            To avoid the (44) popup, ensure the Kiwoom password window has been
+            opened at least once per session. When the window has not been
+            shown, this method triggers it and asks the caller to retry after
+            the user registers the password in Kiwoom.
+            """
 
             if not self.is_enabled():
                 print("[OpenAPI] 잔고 조회 불가: 컨트롤 비활성")
                 return False
-            if not account_pw:
-                print("[OpenAPI] 잔고 조회 중단: 계좌 비밀번호 미입력")
-                print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
+
+            if not self._pw_window_shown:
+                opened = self.show_account_password_window()
+                if opened:
+                    print(
+                        "[OpenAPI] 계좌비밀번호 입력창을 열었습니다. Kiwoom 창에서 비밀번호를 등록/닫은 뒤 다시 조회하세요."
+                    )
                 return False
+
             try:
                 ax = self.ax
                 if not (ax and hasattr(ax, "dynamicCall")):
                     print("[OpenAPI] dynamicCall 불가: ax 없음")
                     return False
 
+                pw_value = account_pw or ""
                 # opw00001 - deposit
                 ax.dynamicCall("SetInputValue(QString, QString)", "계좌번호", account_no)
-                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", account_pw)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", pw_value)
                 ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
                 ax.dynamicCall("SetInputValue(QString, QString)", "조회구분", "2")
                 ax.dynamicCall(
@@ -686,7 +726,7 @@ else:
                 )
                 # opw00018 - holdings
                 ax.dynamicCall("SetInputValue(QString, QString)", "계좌번호", account_no)
-                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", account_pw)
+                ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", pw_value)
                 ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
                 ax.dynamicCall("SetInputValue(QString, QString)", "상장폐지조회구분", "0")
                 ax.dynamicCall(
@@ -702,8 +742,17 @@ else:
                 print(f"[OpenAPI] 잔고/보유 종목 조회 요청 실패: {exc}")
                 traceback.print_exc()
                 if "44" in str(exc):
-                    print("[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도")
+                    print(
+                        "[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도"
+                    )
+                    self._pw_window_shown = False
                 return False
+
+        def _on_receive_msg(self, screen_no, rqname, trcode, msg) -> None:
+            print(f"[OpenAPI] OnReceiveMsg screen={screen_no} rqname={rqname} trcode={trcode} msg={msg}")
+            if msg and "44" in str(msg):
+                print("[OpenAPI] (44) 메시지 감지 → 비밀번호 창 재호출 가능 상태로 리셋")
+                self._pw_window_shown = False
 
         def _on_receive_tr_data(self, *args) -> None:
             """Generic TR handler focusing on balance requests."""

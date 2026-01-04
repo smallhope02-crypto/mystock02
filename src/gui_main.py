@@ -332,17 +332,9 @@ class MainWindow(QMainWindow):
         self.server_label = QLabel("서버: -")
         self.account_pw_input = QLineEdit()
         self.account_pw_input.setEchoMode(QLineEdit.Password)
-        self.account_pw_input.setPlaceholderText("계좌 비밀번호(조회용)")
-        self.real_order_checkbox = QCheckBox("실주문 활성화")
-        self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
-        self.real_balance_label.setStyleSheet("color: gray;")
-        self.real_balance_refresh = QPushButton("잔고 새로고침")
-        real_layout.addWidget(QLabel("계좌"))
-        real_layout.addWidget(self.account_combo)
-        real_layout.addWidget(self.server_label)
-        real_layout.addWidget(QLabel("비밀번호(조회)"))
-        real_layout.addWidget(self.account_pw_input)
-        real_layout.addWidget(self.real_order_checkbox)
+        self.account_pw_input.setPlaceholderText("계좌비밀번호는 Kiwoom 창에서 저장하세요")
+        self.account_pw_input.setEnabled(False)
+        self.account_pw_button = QPushButton("계al_layout.addWidget(self.real_order_checkbox)
         real_layout.addWidget(self.real_balance_label)
         real_layout.addWidget(self.real_balance_refresh)
         self.real_group.setLayout(real_layout)
@@ -353,7 +345,16 @@ class MainWindow(QMainWindow):
         conn_group.setLayout(conn_layout)
         main.addWidget(conn_group)
 
-        # Condition selector + expression builder (group=OR buckets, between groups=AND)
+        # 좌비밀번호 저장(키움)")
+        self.real_order_checkbox = QCheckBox("실주문 활성화")
+        self.real_balance_label = QLabel("실계좌 예수금: 실거래 모드에서만 표시")
+        self.real_balance_label.setStyleSheet("color: gray;")
+        self.real_balance_refresh = QPushButton("잔고 새로고침")
+        real_layout.addWidget(QLabel("계좌"))
+        real_layout.addWidget(self.account_combo)
+        real_layout.addWidget(self.server_label)
+        real_layout.addWidget(self.account_pw_button)
+        reCondition selector + expression builder (group=OR buckets, between groups=AND)
         cond_group = QGroupBox("조건식 선택 / 그룹 빌더")
         cond_layout = QHBoxLayout()
 
@@ -546,6 +547,7 @@ class MainWindow(QMainWindow):
         self.builder_strip.itemDoubleClicked.connect(self._toggle_operator_token)
         self.real_order_checkbox.toggled.connect(self._on_real_order_toggled)
         self.real_balance_refresh.clicked.connect(self._refresh_real_balance)
+        self.account_pw_button.clicked.connect(self._open_account_pw_window)
         self.account_combo.currentTextChanged.connect(self._on_account_selected)
         if self.openapi_widget and hasattr(self.openapi_widget, "login_result"):
             self._log(
@@ -1517,14 +1519,36 @@ class MainWindow(QMainWindow):
                     f"[INFO] 서버 구분(raw={gubun!r}) 기반으로 실거래 잔고 조회를 진행합니다."
                 )
         if openapi and hasattr(openapi, "request_deposit_and_holdings") and openapi.connected:
-            pw = self.account_pw_input.text().strip()
-            if not pw:
-                self._log("[실거래] 잔고 조회 불가: 계좌 비밀번호(조회용)를 입력하세요. (팝업 방지)")
-                return
-            openapi.request_deposit_and_holdings(account, pw)
-            self._log(f"[실거래] 잔고/보유종목 TR 요청(account={account})")
+            ok = openapi.request_deposit_and_holdings(account)
+            if ok:
+                self._log(f"[실거래] 잔고/보유종목 TR 요청(account={account})")
+            else:
+                if getattr(openapi, "_pw_window_shown", False):
+                    self._log(
+                        "[실거래] 잔고 조회 요청 실패 또는 대기 상태입니다. Kiwoom 창 상태를 확인 후 다시 시도하세요."
+                    )
+                else:
+                    self._log(
+                        "[실거래] 계좌비밀번호 입력창을 열었습니다. 비밀번호 등록/닫기 후 '잔고 새로고침'을 다시 눌러주세요."
+                    )
         else:
             self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음 또는 미로그인")
+
+    def _open_account_pw_window(self) -> None:
+        """Manually open the Kiwoom password window to avoid (44) popups."""
+
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if not (openapi and hasattr(openapi, "show_account_password_window")):
+            self._log("[실거래] 계좌 비밀번호 창 호출 불가: OpenAPI 컨트롤이 없습니다.")
+            return
+        if openapi.show_account_password_window():
+            self._log(
+                "[실거래] 계좌비밀번호 입력창을 열었습니다. 입력/저장 후 '잔고 새로고침'을 다시 눌러주세요."
+            )
+        else:
+            self._log(
+                "[실거래] 계좌비밀번호 입력창 호출 실패 또는 이미 열려 있습니다. Kiwoom 트레이 상태를 확인하세요."
+            )
 
     def _get_symbol_name(self, code: str) -> str:
         if code in self._name_cache:

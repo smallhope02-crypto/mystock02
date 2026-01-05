@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self.real_holdings: list[dict] = []
         self._last_market_log: Optional[datetime.datetime] = None
         self._last_market_reason: str = ""
+        self._last_open_flag: Optional[bool] = None
         self._pending_trigger_name: str = ""
         self._pending_today_candidates: list[str] = []
         self._pending_preset_state: Optional[dict] = None
@@ -1343,6 +1344,25 @@ class MainWindow(QMainWindow):
         self.group_preview_label.setText(self._group_preview_text())
 
     def _evaluate_universe(self, log_prefix: str = "EVAL") -> set[str]:
+        # Ensure we have an expression: if empty, auto-build OR chain from selected conditions
+        if not self.builder_tokens:
+            selected = self._selected_conditions()
+            if selected:
+                auto_tokens: list[dict] = []
+                for idx, (_cid, name) in enumerate(selected):
+                    auto_tokens.append(
+                        {
+                            "type": "COND",
+                            "value": name,
+                            "text": self._condition_id_text(name),
+                            "tooltip": name,
+                        }
+                    )
+                    if idx < len(selected) - 1:
+                        auto_tokens.append({"type": "OP", "value": "OR", "text": "OR", "tooltip": "OR"})
+                self.builder_tokens = auto_tokens
+                self._refresh_builder_strip()
+                self._log("[EVAL] builder empty → 자동 OR 구성으로 대체")
         # Evaluate RT expression
         self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=False)
         rt_set, postfix = self.condition_manager.evaluate(source="rt")
@@ -1377,6 +1397,8 @@ class MainWindow(QMainWindow):
         )
         if not final_set:
             reason = gate_reason or "expression_result_empty"
+            if not self.builder_tokens:
+                reason = "builder_empty"
             if not rt_set and not today_union:
                 reason = "no_condition_data"
             self._log(
@@ -1529,7 +1551,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("상태: 자동 매매 중 (주문 활성화)")
         else:
             self.auto_trading_armed = True
-            self.trading_orders_enabled = False
+            self.trading_orders_enabled = not self.enforce_market_hours
             self.status_label.setText("상태: 감시중 (장전 대기)")
             self._log_market_guard(reason, now)
 
@@ -1551,26 +1573,33 @@ class MainWindow(QMainWindow):
             return
         open_flag, reason, now = self._market_state()
         allow_orders = True
-        if self.enforce_market_hours and not open_flag:
-            if self.trading_orders_enabled or not self.auto_trading_armed:
-                self.trading_orders_enabled = False
+
+        # 장 상태 변경 감지 (once per transition)
+        if self._last_open_flag is None:
+            self._last_open_flag = open_flag
+        elif self._last_open_flag != open_flag:
+            self._last_open_flag = open_flag
+            if open_flag:
+                self.trading_orders_enabled = True
+                self.auto_trading_armed = False
+                self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
+            else:
+                if self.enforce_market_hours:
+                    self.trading_orders_enabled = False
                 self.auto_trading_armed = True
-                self._log(
-                    f"[상태] 장전/휴장 감시모드 진입: 주문 차단 (reason={reason})"
-                )
-            self._log_market_guard(reason, now)
-            self._refresh_positions(market_open=False)
+                self._log_market_guard(reason, now)
+
+        if not open_flag:
             if not self.allow_premarket_monitor_checkbox.isChecked():
+                self._log_market_guard(reason, now)
+                self._refresh_positions(market_open=False)
                 return
-            allow_orders = False
+            self._log_market_guard(reason, now)
+            if self.enforce_market_hours:
+                allow_orders = False
             self._log(
                 f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
             )
-        # 장중 전환 감지
-        if self.auto_trading_armed or not self.trading_orders_enabled:
-            self.trading_orders_enabled = True
-            self.auto_trading_armed = False
-            self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
         if not self.condition_universe:
             self._log(
                 "[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵"
@@ -1581,12 +1610,14 @@ class MainWindow(QMainWindow):
             self._refresh_positions(market_open=self._is_market_open())
             return
         self.engine.set_external_universe(list(self.condition_universe))
+        if self.enforce_market_hours:
+            allow_orders = self.trading_orders_enabled and open_flag
+        else:
+            allow_orders = self.trading_orders_enabled
         self._log(
-            f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
+            f"[AUTO] broker_mode={self.engine.broker_mode} open_flag={open_flag} enforce_market_hours={self.enforce_market_hours} allow_orders={allow_orders} universe={len(self.condition_universe)} holdings={len(self.strategy.positions)} max_positions={self.strategy.max_positions}"
         )
         self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
-        if not (self.trading_orders_enabled and open_flag):
-            allow_orders = False
         if not allow_orders:
             self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
         self.engine.run_once("combined", allow_orders=allow_orders)

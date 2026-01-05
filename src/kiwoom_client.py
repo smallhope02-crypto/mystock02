@@ -46,6 +46,7 @@ class KiwoomClient:
         self._real_orderable: int = 0
         self._real_holdings: list = []
         self._last_prices: Dict[str, float] = {}
+        self._last_block_reason: str = ""
 
     def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
         """Attach a GUI-hosted QAx Kiwoom control.
@@ -171,16 +172,23 @@ class KiwoomClient:
         return {"cash": float(self.get_real_balance())}
 
     def _can_send_real_order(self) -> bool:
+        self._last_block_reason = ""
         if not self.openapi:
-            logger.warning("[REAL MODE] OpenAPI 미초기화로 주문 불가")
+            self._last_block_reason = "OpenAPI 미초기화로 주문 불가"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         if not getattr(self.openapi, "connected", False):
-            logger.warning("[REAL MODE] OpenAPI 미로그인 상태로 주문 불가")
+            self._last_block_reason = "OpenAPI 미로그인 상태로 주문 불가"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         if hasattr(self.openapi, "is_simulation_server") and self.openapi.is_simulation_server():
-            logger.warning("[REAL MODE] 현재 서버가 모의(raw=1) → 주문 차단")
+            self._last_block_reason = "현재 서버가 모의(raw=1) → 주문 차단"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         return True
+
+    def get_last_block_reason(self) -> str:
+        return self._last_block_reason
 
     def list_conditions(self) -> List[str]:
         """Return only condition names for backward compatibility."""

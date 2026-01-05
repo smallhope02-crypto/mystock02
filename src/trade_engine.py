@@ -102,12 +102,24 @@ class TradeEngine:
 
         self._reset_daily_if_needed()
         self.strategy.cash = self._current_cash()
-        universe = [s for s in self.selector.select(condition_name) if self._can_buy(s)]
+        raw_universe = list(self.selector.select(condition_name))
+        universe = [s for s in raw_universe if self._can_buy(s)]
+        if self.log_fn:
+            self.log_fn(
+                f"[ENGINE] universe_raw={len(raw_universe)} filtered={len(universe)} allow_orders={allow_orders}"
+            )
 
         exit_orders = self.strategy.evaluate_exit(self._active_price_lookup)
+        if self.log_fn:
+            self.log_fn(f"[ENGINE] exit_orders={len(exit_orders)}")
         self._execute_orders(exit_orders, allow_orders=allow_orders)
 
         entry_orders = self.strategy.evaluate_entry(universe, self._entry_price_lookup)
+        if self.log_fn:
+            debug = getattr(self.strategy, "last_entry_debug", {}) or {}
+            self.log_fn(
+                f"[ENGINE] entry_orders={len(entry_orders)} budget_per_slot={debug.get('budget_per_slot')} skips={debug.get('skip_counts')} samples={debug.get('samples')}"
+            )
         self._execute_orders(entry_orders, allow_orders=allow_orders)
 
         # Keep strategy cash aligned to the active broker's view
@@ -142,6 +154,11 @@ class TradeEngine:
                     self.strategy.register_fill(order, broker_result.quantity, broker_result.price)
                     if order.side == "buy":
                         self._record_buy_fill(order.symbol)
+                elif broker_result.status == "blocked" and self.log_fn:
+                    reason = ""
+                    if hasattr(self.kiwoom_client, "get_last_block_reason"):
+                        reason = self.kiwoom_client.get_last_block_reason()
+                    self.log_fn(f"[BUY] blocked real order: {reason or 'unknown'}")
                 logger.info(
                     "Executed %s %s x%d at %.2f (%s)",
                     order.side,

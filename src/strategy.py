@@ -53,6 +53,7 @@ class Strategy:
         self.time_limit_minutes = time_limit_minutes
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
+        self.last_entry_debug: Dict[str, object] = {}
 
     def update_parameters(self, **kwargs) -> None:
         """Update strategy parameters such as cash or position limits."""
@@ -78,16 +79,28 @@ class Strategy:
         remaining_cash = self.cash
         budget_per_slot = remaining_cash / max(available_slots, 1)
         orders: List[Order] = []
+        skip_counts = {
+            "already_held": 0,
+            "price_le_zero": 0,
+            "qty_lt_1": 0,
+            "cash_short": 0,
+        }
+        sample_calc: List[str] = []
 
         for symbol in symbols:
             if symbol in self.positions:
+                skip_counts["already_held"] += 1
                 continue
             if len(self.positions) + len(orders) >= self.max_positions:
                 break
 
             price = price_lookup(symbol)
+            if price <= 0:
+                skip_counts["price_le_zero"] += 1
+                continue
             quantity = int(budget_per_slot // price)
             if quantity < 1:
+                skip_counts["qty_lt_1"] += 1
                 continue
 
             estimated_cost = quantity * price
@@ -95,11 +108,36 @@ class Strategy:
                 quantity = int(remaining_cash // price)
                 estimated_cost = quantity * price
             if quantity < 1:
+                skip_counts["cash_short"] += 1
                 continue
 
             remaining_cash -= estimated_cost
             orders.append(Order(side="buy", symbol=symbol, quantity=quantity, price=price))
+            if len(sample_calc) < 5:
+                sample_calc.append(f"{symbol}: price={price:.2f} qty={quantity}")
 
+        self.last_entry_debug = {
+            "budget_per_slot": budget_per_slot,
+            "skip_counts": skip_counts,
+            "samples": list(sample_calc),
+            "orders": len(orders),
+        }
+
+        if not orders and symbols:
+            logger.info(
+                "[ENTRY] no orders: budget_per_slot=%.2f skips=%s samples=%s",
+                budget_per_slot,
+                skip_counts,
+                sample_calc,
+            )
+        elif orders:
+            logger.info(
+                "[ENTRY] generated %d orders budget_per_slot=%.2f skips=%s samples=%s",
+                len(orders),
+                budget_per_slot,
+                skip_counts,
+                sample_calc,
+            )
         return orders
 
     def evaluate_exit(self, price_lookup: Callable[[str], float]) -> List[Order]:

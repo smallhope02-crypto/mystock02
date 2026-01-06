@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import sys
+import time
 from typing import List, Optional, Sequence
 
 try:
@@ -51,6 +52,7 @@ from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
 from .selector import UniverseSelector
 from .strategy import Strategy
 from .trade_engine import TradeEngine
+from .universe_diag import classify_universe_empty
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,9 @@ class MainWindow(QMainWindow):
         self._pending_today_candidates: list[str] = []
         self._pending_preset_state: Optional[dict] = None
         self._pending_preset_name: str = str(self.settings.value("builder/last_preset", "") or "")
+        self._last_universe_diag: dict = {}
+        self._last_cond_event_ts: float | None = None
+        self._warned_no_cond_event: bool = False
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -891,28 +896,44 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str, str, int, str)
     def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
         codes = [code for code in str(code_list).split(";") if code]
+        name_key = condition_name
         if condition_name not in self.condition_manager.condition_sets_rt:
+            alt = condition_name.strip()
             active = list(self.condition_manager.condition_sets_rt.keys())
-            self._log(
-                f"[조건][WARN] 수신된 조건({condition_name})이 활성 목록에 없습니다. active={active}"
-            )
-        self.condition_manager.update_condition(condition_name, codes)
-        label = self._condition_id_text(condition_name)
+            if alt != condition_name and alt in self.condition_manager.condition_sets_rt:
+                self._log(f"[조건] condition_name normalize: '{condition_name}' -> '{alt}'")
+                name_key = alt
+            else:
+                self._log(
+                    f"[조건][WARN] 수신된 조건({condition_name})이 활성 목록에 없습니다. active={active}"
+                )
+        self.condition_manager.update_condition(name_key, codes)
+        label = self._condition_id_text(name_key)
         self._log(
-            f"[COND_EVT] 초기 조회 결과 수신 cond={condition_name}({label}) idx={index} count={len(codes)}"
+            f"[COND_EVT] 초기 조회 결과 수신 cond={name_key}({label}) idx={index} count={len(codes)}"
         )
+        self._last_cond_event_ts = time.time()
+        self._warned_no_cond_event = False
         self._recompute_universe()
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
+        name_key = condition_name
         if condition_name not in self.condition_manager.condition_sets_rt:
-            return
-        self.condition_manager.apply_event(condition_name, code, event)
+            alt = condition_name.strip()
+            if alt in self.condition_manager.condition_sets_rt:
+                self._log(f"[조건] condition_name normalize: '{condition_name}' -> '{alt}' (real)")
+                name_key = alt
+            else:
+                return
+        self.condition_manager.apply_event(name_key, code, event)
         action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
-        label = self._condition_id_text(condition_name)
+        label = self._condition_id_text(name_key)
         self._log(
-            f"[COND_EVT] {action}: {code} (조건 {condition_name}/{label}/{condition_index})"
+            f"[COND_EVT] {action}: {code} (조건 {name_key}/{label}/{condition_index})"
         )
+        self._last_cond_event_ts = time.time()
+        self._warned_no_cond_event = False
         self._recompute_universe()
 
     def _recompute_universe(self) -> None:
@@ -1392,18 +1413,34 @@ class MainWindow(QMainWindow):
         self.condition_universe_today = today_union if gate_ok else set()
         self.condition_universe = final_set
         rt_counts = self.condition_manager.counts()
+        diag = {
+            "infix": infix,
+            "postfix": postfix_txt,
+            "active_conditions": [t.get("value") for t in self.builder_tokens if t.get("type") == "COND"],
+            "rt_counts": rt_counts,
+            "today_counts": today_counts,
+            "trigger_name": trigger_name,
+            "trigger_hits_count": len(trigger_hits),
+            "gate_on": gate_on,
+            "gate_ok": gate_ok,
+            "gate_reason": gate_reason,
+            "rt_set_count": len(rt_set),
+            "today_union_count": len(today_union),
+            "final_set_count": len(final_set),
+        }
+        self._last_universe_diag = diag
         self._log(
             f"[{log_prefix}] infix={infix} postfix={postfix_txt} rt_count={len(rt_set)} rt_counts={rt_counts} today_union={len(today_union)} gate_on={gate_on} gate_ok={gate_ok} gate_reason={gate_reason} final={len(final_set)}"
         )
         if not final_set:
-            reason = gate_reason or "expression_result_empty"
-            if not self.builder_tokens:
-                reason = "builder_empty"
-            if not rt_set and not today_union:
-                reason = "no_condition_data"
+            reason, message = classify_universe_empty(diag)
+            diag["reason"] = reason
+            diag["message"] = message
             self._log(
                 f"[유니버스] condition_universe empty reason={reason} trigger_seen={len(trigger_hits)}>0 today_union={len(today_union)}"
             )
+            self._log(f"[유니버스] {message}")
+            self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
         return final_set
 
     def _preview_candidates(self) -> None:
@@ -1507,12 +1544,17 @@ class MainWindow(QMainWindow):
             return
 
         if not self.condition_universe:
+            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            diag = self._last_universe_diag or {}
+            reason = diag.get("reason")
+            message = diag.get("message", "")
+            if not reason:
+                reason, message = classify_universe_empty(diag)
             self._log(
-                "[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵"
+                message
+                or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
             )
-            self._log(
-                "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
-            )
+            self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
             return
 
         self.engine.set_external_universe(list(self.condition_universe))
@@ -1544,6 +1586,16 @@ class MainWindow(QMainWindow):
             return
 
         open_flag, reason, now = self._market_state()
+        rt_counts = self.condition_manager.counts()
+        active_conditions = [t.get("value") for t in self.builder_tokens if t.get("type") == "COND"]
+        if active_conditions and all(v == 0 for v in rt_counts.values()):
+            if not self._warned_no_cond_event and (
+                not self._last_cond_event_ts or (time.time() - self._last_cond_event_ts) > 30
+            ):
+                self._log(
+                    "[조건][WARN] 조건 결과를 아직 수신하지 못했습니다. '조건 실행(실시간 포함)'을 눌러 SendCondition 실행 후 [COND_EVT] 로그가 나오는지 확인하세요."
+                )
+                self._warned_no_cond_event = True
         self.auto_trading_active = True
         if open_flag:
             self.auto_trading_armed = False
@@ -1601,12 +1653,17 @@ class MainWindow(QMainWindow):
                 f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
             )
         if not self.condition_universe:
+            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+            diag = self._last_universe_diag or {}
+            reason = diag.get("reason")
+            message = diag.get("message", "")
+            if not reason:
+                reason, message = classify_universe_empty(diag)
             self._log(
-                "[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵"
+                message
+                or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
             )
-            self._log(
-                "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
-            )
+            self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
             self._refresh_positions(market_open=self._is_market_open())
             return
         self.engine.set_external_universe(list(self.condition_universe))

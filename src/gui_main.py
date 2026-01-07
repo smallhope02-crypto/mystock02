@@ -1352,6 +1352,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _update_expression_from_tokens(self, reset_sets: bool = False) -> None:
+        if not self.builder_tokens:
+            self.condition_manager.set_expression_tokens([], reset_sets=False)
+            if reset_sets:
+                self.condition_manager.reset_sets()
+            self._log("[EXPR] builder empty -> expression cleared")
+            self._update_group_preview()
+            return
         if not self._validate_builder():
             return
         self.condition_manager.set_expression_tokens(self.builder_tokens, reset_sets=reset_sets)

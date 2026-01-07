@@ -342,8 +342,8 @@ class MainWindow(QMainWindow):
         self.server_label = QLabel("서버: -")
         self.account_pw_input = QLineEdit()
         self.account_pw_input.setEchoMode(QLineEdit.Password)
-        self.account_pw_input.setPlaceholderText("계좌비밀번호는 Kiwoom 창에서 저장하세요")
-        self.account_pw_input.setEnabled(False)
+        self.account_pw_input.setPlaceholderText("세션 메모리만 사용(저장하지 않음)")
+        self.account_pw_input.setToolTip("실거래 잔고 조회용 비밀번호(세션 메모리만 사용)")
         # OpenAPI 비밀번호 입력창으로 유도하는 버튼(직접 비밀번호는 저장하지 않음)
         self.account_pw_button = QPushButton("계좌비밀번호 저장 (키움 창 열기)")
         self.real_order_checkbox = QCheckBox("실주문 활성화")
@@ -353,6 +353,8 @@ class MainWindow(QMainWindow):
         real_layout.addWidget(QLabel("계좌"))
         real_layout.addWidget(self.account_combo)
         real_layout.addWidget(self.server_label)
+        real_layout.addWidget(QLabel("계좌 비밀번호(세션)"))
+        real_layout.addWidget(self.account_pw_input)
         real_layout.addWidget(self.account_pw_button)
         real_layout.addWidget(self.real_order_checkbox)
         real_layout.addWidget(self.real_balance_label)
@@ -635,6 +637,8 @@ class MainWindow(QMainWindow):
             self.openapi_widget.holdings_received.connect(self._on_holdings_received)
         if self.openapi_widget and hasattr(self.openapi_widget, "server_gubun_changed"):
             self.openapi_widget.server_gubun_changed.connect(self._on_server_gubun_changed)
+        if self.openapi_widget and hasattr(self.openapi_widget, "password_required"):
+            self.openapi_widget.password_required.connect(self._on_password_required)
 
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
@@ -765,8 +769,10 @@ class MainWindow(QMainWindow):
         self.real_group.setEnabled(mode == "real")
         if mode == "paper":
             self.real_balance_label.setStyleSheet("color: gray;")
+            self.account_pw_input.setEnabled(False)
         else:
             self.real_balance_label.setStyleSheet("color: black;")
+            self.account_pw_input.setEnabled(True)
 
     def _apply_parameters_from_controls(self) -> None:
         params = dict(
@@ -972,6 +978,10 @@ class MainWindow(QMainWindow):
         self.real_holdings = holdings
         self._log(f"[실거래] 보유종목 수신: {len(holdings)}건")
         self._refresh_positions(market_open=self._is_market_open())
+
+    @pyqtSlot(str)
+    def _on_password_required(self, message: str) -> None:
+        self._log(f"[실거래] {message}")
 
     @pyqtSlot(str, dict)
     def _on_real_data_received(self, code: str, payload: dict) -> None:
@@ -1806,17 +1816,22 @@ class MainWindow(QMainWindow):
                     f"[INFO] 서버 구분(raw={gubun!r}) 기반으로 실거래 잔고 조회를 진행합니다."
                 )
         if openapi and hasattr(openapi, "request_deposit_and_holdings") and openapi.connected:
-            ok = openapi.request_deposit_and_holdings(account)
+            account_pw = self.account_pw_input.text().strip()
+            if not account_pw:
+                self._log(
+                    "[실거래] 계좌비밀번호가 필요합니다. 입력 후 '잔고 새로고침'을 다시 눌러주세요."
+                )
+                return
+            ok = openapi.request_deposit_and_holdings(account, account_pw=account_pw)
             if ok:
-                self._log(f"[실거래] 잔고/보유종목 TR 요청(account={account})")
+                masked = f"{account[:-2]}**" if len(account) > 2 else "**"
+                self._log(f"[실거래] 잔고/보유종목 TR 요청(account={masked})")
             else:
-                if getattr(openapi, "_pw_window_shown", False):
-                    self._log(
-                        "[실거래] 잔고 조회 요청 실패 또는 대기 상태입니다. Kiwoom 창 상태를 확인 후 다시 시도하세요."
-                    )
+                if getattr(openapi, "_balance_req_inflight", False):
+                    self._log("[실거래] 잔고 조회 요청이 진행 중입니다. 잠시 후 다시 시도하세요.")
                 else:
                     self._log(
-                        "[실거래] 계좌비밀번호 입력창을 열었습니다. 비밀번호 등록/닫기 후 '잔고 새로고침'을 다시 눌러주세요."
+                        "[실거래] 잔고 조회 요청이 실패했습니다. 비밀번호 입력 및 로그인 상태를 확인하세요."
                     )
         else:
             self._log("[실거래] 잔고 조회 불가: OpenAPI 컨트롤 없음 또는 미로그인")

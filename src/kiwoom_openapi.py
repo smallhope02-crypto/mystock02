@@ -173,6 +173,7 @@ else:
         balance_received = QtCore.pyqtSignal(int, int)  # (cash, orderable)
         holdings_received = QtCore.pyqtSignal(list)  # list of dicts
         server_gubun_changed = QtCore.pyqtSignal(str)
+        password_required = QtCore.pyqtSignal(str)
 
         def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
@@ -195,6 +196,10 @@ else:
             self.server_gubun: str = ""
             self.last_prices: dict[str, float] = {}
             self._pw_window_shown: bool = False
+            self._balance_req_inflight: bool = False
+            self._balance_req_pending: set[str] = set()
+            self._balance_req_timer: Optional[QtCore.QTimer] = None
+            self._balance_req_timeout_ms: int = 12000
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -684,25 +689,57 @@ else:
                 self._pw_window_shown = False
                 return False
 
+        def _mask_account(self, account_no: str) -> str:
+            account_no = str(account_no or "")
+            if len(account_no) <= 2:
+                return "**"
+            return f"{account_no[:-2]}**"
+
+        def _start_balance_timeout(self) -> None:
+            if self._balance_req_timer is None:
+                self._balance_req_timer = QtCore.QTimer(self)
+                self._balance_req_timer.setSingleShot(True)
+                self._balance_req_timer.timeout.connect(self._on_balance_timeout)
+            self._balance_req_timer.start(self._balance_req_timeout_ms)
+
+        def _on_balance_timeout(self) -> None:
+            if not self._balance_req_inflight:
+                return
+            self._clear_balance_inflight()
+            print("[OpenAPI] 잔고 조회 타임아웃: 응답 없음")
+
+        def _clear_balance_inflight(self) -> None:
+            self._balance_req_inflight = False
+            self._balance_req_pending.clear()
+            if self._balance_req_timer is not None:
+                self._balance_req_timer.stop()
+
+        def _mark_balance_pending_done(self, rqname: str) -> None:
+            if rqname in self._balance_req_pending:
+                self._balance_req_pending.discard(rqname)
+            if self._balance_req_inflight and not self._balance_req_pending:
+                self._clear_balance_inflight()
+
         def request_deposit_and_holdings(self, account_no: str, account_pw: str | None = None) -> bool:
             """Request deposit (opw00001) and holdings (opw00018).
 
             To avoid the (44) popup, ensure the Kiwoom password window has been
-            opened at least once per session. When the window has not been
-            shown, this method triggers it and asks the caller to retry after
-            the user registers the password in Kiwoom.
+            opened at least once per session. When the password is missing,
+            this method emits ``password_required`` and returns False without
+            sending TR requests.
             """
 
             if not self.is_enabled():
                 print("[OpenAPI] 잔고 조회 불가: 컨트롤 비활성")
                 return False
 
-            if not self._pw_window_shown:
-                opened = self.show_account_password_window()
-                if opened:
-                    print(
-                        "[OpenAPI] 계좌비밀번호 입력창을 열었습니다. Kiwoom 창에서 비밀번호를 등록/닫은 뒤 다시 조회하세요."
-                    )
+            if self._balance_req_inflight:
+                print("[OpenAPI] 잔고 조회 요청이 진행 중입니다. 잠시 후 다시 시도하세요.")
+                return False
+
+            if not account_pw:
+                self.password_required.emit("계좌비밀번호가 필요합니다.")
+                print("[OpenAPI] 잔고 조회 보류: 계좌비밀번호 미입력")
                 return False
 
             try:
@@ -712,6 +749,9 @@ else:
                     return False
 
                 pw_value = account_pw or ""
+                self._balance_req_inflight = True
+                self._balance_req_pending = {"opw00001-balance", "opw00018-holdings"}
+                self._start_balance_timeout()
                 # opw00001 - deposit
                 ax.dynamicCall("SetInputValue(QString, QString)", "계좌번호", account_no)
                 ax.dynamicCall("SetInputValue(QString, QString)", "비밀번호", pw_value)
@@ -736,23 +776,28 @@ else:
                     0,
                     self.screen_no,
                 )
-                print(f"[OpenAPI] 잔고/보유 종목 조회 요청(opw00001/opw00018) account={account_no}")
+                masked = self._mask_account(account_no)
+                print(f"[OpenAPI] 잔고/보유 종목 조회 요청(opw00001/opw00018) account={masked}")
                 return True
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] 잔고/보유 종목 조회 요청 실패: {exc}")
                 traceback.print_exc()
+                self._clear_balance_inflight()
                 if "44" in str(exc):
-                    print(
-                        "[조치] OpenAPI 트레이 아이콘 우클릭 → '계좌비밀번호 저장'에서 비밀번호 등록 후 다시 시도"
+                    print("[OpenAPI] (44) 응답 감지: 계좌비밀번호 확인 필요")
+                    self.password_required.emit(
+                        "계좌비밀번호가 필요합니다. 키움에서 비밀번호를 등록한 뒤 다시 시도하세요."
                     )
-                    self._pw_window_shown = False
                 return False
 
         def _on_receive_msg(self, screen_no, rqname, trcode, msg) -> None:
             print(f"[OpenAPI] OnReceiveMsg screen={screen_no} rqname={rqname} trcode={trcode} msg={msg}")
             if msg and "44" in str(msg):
-                print("[OpenAPI] (44) 메시지 감지 → 비밀번호 창 재호출 가능 상태로 리셋")
-                self._pw_window_shown = False
+                print("[OpenAPI] (44) 메시지 감지 → 비밀번호 입력 필요")
+                self._clear_balance_inflight()
+                self.password_required.emit(
+                    "계좌비밀번호가 필요합니다. 키움 계좌비밀번호 등록 후 다시 시도하세요."
+                )
 
         def _on_receive_tr_data(self, *args) -> None:
             """Generic TR handler focusing on balance requests."""
@@ -770,11 +815,14 @@ else:
 
                 if rqname == "opw00001-balance":
                     self._parse_balance(trcode, rqname)
+                    self._mark_balance_pending_done(rqname)
                 elif rqname == "opw00018-holdings":
                     self._parse_holdings(trcode, rqname)
+                    self._mark_balance_pending_done(rqname)
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] OnReceiveTrData 처리 실패: {exc}")
                 traceback.print_exc()
+                self._clear_balance_inflight()
 
         def _parse_balance(self, trcode: str, rqname: str) -> None:
             """Parse opw00001 예수금상세현황요청 response."""

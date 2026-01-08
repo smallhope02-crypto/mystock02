@@ -49,10 +49,13 @@ from .config import AppConfig, load_config
 from .condition_manager import ConditionManager
 from .kiwoom_client import KiwoomClient
 from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
+from .paper_broker import PaperBroker
 from .selector import UniverseSelector
 from .strategy import Strategy
 from .trade_engine import TradeEngine
+from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
+from .gui_trade_history import TradeHistoryDialog
 
 logger = logging.getLogger(__name__)
 
@@ -207,12 +210,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Mystock02 Auto Trader")
 
         self.settings = QSettings("Mystock02", "AutoTrader")
+        self.history_store = TradeHistoryStore()
         self.current_config = load_config()
         self.strategy = Strategy()
         self.kiwoom_client = KiwoomClient(
             account_no=self.settings.value("connection/real/account_no", self.current_config.account_no),
             app_key=self.settings.value("connection/real/app_key", self.current_config.app_key),
             app_secret=self.settings.value("connection/real/app_secret", self.current_config.app_secret),
+            history_store=self.history_store,
         )
         self.openapi_widget: Optional[KiwoomOpenAPI] = None
         if QAX_AVAILABLE:
@@ -224,11 +229,13 @@ class MainWindow(QMainWindow):
         else:
             print("[GUI] QAxContainer 가 없어 OpenAPI 위젯을 생성하지 않습니다.")
         self.selector = UniverseSelector(kiwoom_client=self.kiwoom_client)
+        paper_broker = PaperBroker(initial_cash=self.strategy.initial_cash, history_store=self.history_store)
         self.engine = TradeEngine(
             strategy=self.strategy,
             selector=self.selector,
             broker_mode="paper",
             kiwoom_client=self.kiwoom_client,
+            paper_broker=paper_broker,
             log_fn=self._log,
         )
         self.engine.set_buy_limits(rebuy_after_sell_today=False, max_buy_per_symbol_today=1)
@@ -309,8 +316,10 @@ class MainWindow(QMainWindow):
 
         self.config_btn = QPushButton("연동 설정")
         self.openapi_login_button = QPushButton("조건식 로그인")
+        self.history_button = QPushButton("매수/매도 이력")
         radio_layout.addWidget(self.config_btn)
         radio_layout.addWidget(self.openapi_login_button)
+        radio_layout.addWidget(self.history_button)
 
         conn_layout.addLayout(radio_layout)
 
@@ -567,6 +576,7 @@ class MainWindow(QMainWindow):
         self.auto_stop_btn.clicked.connect(self.on_auto_stop)
         self.config_btn.clicked.connect(self.on_open_config)
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
+        self.history_button.clicked.connect(self._open_trade_history)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.preview_candidates_btn.clicked.connect(self._preview_candidates)
@@ -1858,6 +1868,10 @@ class MainWindow(QMainWindow):
             self._log(
                 "[실거래] 계좌비밀번호 입력창 호출 실패 또는 이미 열려 있습니다. Kiwoom 트레이 상태를 확인하세요."
             )
+
+    def _open_trade_history(self) -> None:
+        dialog = TradeHistoryDialog(self.history_store, self)
+        dialog.exec_()
 
     def _get_symbol_name(self, code: str) -> str:
         if code in self._name_cache:

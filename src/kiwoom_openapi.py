@@ -566,11 +566,16 @@ else:
             try:
                 ax = self.ax
                 if ax and hasattr(ax, "dynamicCall"):
-                    for fid in (9203, 9001, 302, 10, 904, 913):
+                    raw_fids: dict[str, str] = {}
+                    fid_tokens = [f for f in str(fid_list).split(";") if f]
+                    for fid in fid_tokens:
                         try:
-                            payload[str(fid)] = ax.dynamicCall("GetChejanData(int)", int(fid))
+                            raw_fids[str(fid)] = str(ax.dynamicCall("GetChejanData(int)", int(fid)))
                         except Exception:
-                            payload[str(fid)] = ""
+                            raw_fids[str(fid)] = ""
+                    payload["raw_fids"] = raw_fids
+                    for fid in (9203, 9001, 302, 10, 904, 913):
+                        payload[str(fid)] = raw_fids.get(str(fid), "")
                 print(f"[OpenAPI] OnReceiveChejanData payload={payload}")
             except Exception as exc:  # pragma: no cover - runtime dependent
                 print(f"[OpenAPI] Chejan 처리 실패: {exc}")

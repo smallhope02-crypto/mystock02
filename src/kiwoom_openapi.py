@@ -16,6 +16,7 @@ import traceback
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+from .condition_logger import condition_event
 
 try:  # pragma: no cover - platform dependent
     from PyQt5 import QtCore, QtWidgets
@@ -429,6 +430,14 @@ else:
                     print(
                         f"[OpenAPI] SendCondition screen={screen_no} name={condition_name} index={index} search_type={search_type} ret={ret}"
                     )
+                    condition_event(
+                        "SendCondition",
+                        screenNo=str(screen_no),
+                        conditionName=str(condition_name),
+                        conditionIndex=int(index),
+                        searchType=int(search_type),
+                        ret=int(ret),
+                    )
                     if ret != 1:
                         print(
                             f"[OpenAPI][ERROR] SendCondition 실패 ret={ret} screen={screen_no} name={condition_name} index={index} search_type={search_type}"
@@ -460,6 +469,7 @@ else:
                 ec = -1
             self.connected = ec == 0
             print(f"[OpenAPI] OnEventConnect err_code={ec} enabled={self.enabled}")
+            condition_event("OnEventConnect", errCode=ec)
             self.login_result.emit(ec)
             if self.connected:
                 # clear cached server info so we always read the latest value after login
@@ -471,6 +481,7 @@ else:
 
         def _on_receive_condition_ver(self, lRet: int, sMsg: str) -> None:
             print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
+            condition_event("OnReceiveConditionVer", ret=int(lRet), msg=str(sMsg))
             if lRet == 1:
                 previous_len = len(self.conditions)
                 parsed = self.fetch_condition_list(apply=False)
@@ -497,12 +508,27 @@ else:
             print(
                 f"[OpenAPI] OnReceiveTrCondition screen={screen_no} condition={condition_name} index={index} next={next_} codes={code_list}"
             )
+            condition_event(
+                "OnReceiveTrCondition",
+                screenNo=str(screen_no),
+                conditionName=str(condition_name),
+                conditionIndex=int(index),
+                next=str(next_),
+                codeList=str(code_list),
+            )
             self.last_universe = [code for code in str(code_list).split(";") if code]
             self.tr_condition_received.emit(str(screen_no), str(code_list), str(condition_name), int(index), str(next_))
 
         def _on_receive_real_condition(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
             print(
                 f"[OpenAPI] OnReceiveRealCondition code={code} event={event} condition={condition_name} index={condition_index}"
+            )
+            condition_event(
+                "OnReceiveRealCondition",
+                code=str(code),
+                eventType=str(event),
+                conditionName=str(condition_name),
+                conditionIndex=str(condition_index),
             )
             self.real_condition_received.emit(str(code), str(event), str(condition_name), str(condition_index))
 

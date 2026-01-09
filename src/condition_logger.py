@@ -64,7 +64,9 @@ def condition_event(event: str, **fields: Any) -> None:
             payload["codeList"] = codes
             payload.update(_summarize_codes(codes))
         payload.update(fields)
-        get_condition_logger().info(json.dumps(payload, ensure_ascii=False))
+        line = json.dumps(payload, ensure_ascii=False)
+        get_condition_logger().info(line)
+        logging.getLogger("mystock02.condition").info(line)
     except Exception:
         # Logging must never break main flows.
         return

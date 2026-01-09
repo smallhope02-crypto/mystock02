@@ -175,6 +175,7 @@ else:
         holdings_received = QtCore.pyqtSignal(list)  # list of dicts
         server_gubun_changed = QtCore.pyqtSignal(str)
         password_required = QtCore.pyqtSignal(str)
+        condition_raw_log = QtCore.pyqtSignal(str)
 
         def __init__(self, parent=None, qwidget_parent: Optional[QtWidgets.QWidget] = None):
             super().__init__(parent)
@@ -420,6 +421,19 @@ else:
 
             if not self.conditions_loaded:
                 print("[OpenAPI] 조건식이 로딩되지 않았습니다.")
+                condition_event(
+                    "SendConditionBlocked",
+                    reason="conditions_loaded_false",
+                    screenNo=str(screen_no),
+                    conditionName=str(condition_name),
+                    conditionIndex=int(index),
+                    searchType=int(search_type),
+                    conditionsLoaded=bool(self.conditions_loaded),
+                    connected=bool(self.connected),
+                )
+                self.condition_raw_log.emit(
+                    f"[조건] SendCondition 차단: conditions_loaded=False name={condition_name} idx={index}"
+                )
                 return 0
             target = self.ax
             try:
@@ -437,6 +451,9 @@ else:
                         conditionIndex=int(index),
                         searchType=int(search_type),
                         ret=int(ret),
+                    )
+                    self.condition_raw_log.emit(
+                        f"[조건] SendCondition name={condition_name} idx={index} screen={screen_no} search_type={search_type} ret={ret}"
                     )
                     if ret != 1:
                         print(
@@ -470,6 +487,7 @@ else:
             self.connected = ec == 0
             print(f"[OpenAPI] OnEventConnect err_code={ec} enabled={self.enabled}")
             condition_event("OnEventConnect", errCode=ec)
+            self.condition_raw_log.emit(f"[조건] OnEventConnect err_code={ec}")
             self.login_result.emit(ec)
             if self.connected:
                 # clear cached server info so we always read the latest value after login
@@ -482,6 +500,7 @@ else:
         def _on_receive_condition_ver(self, lRet: int, sMsg: str) -> None:
             print(f"[OpenAPI] OnReceiveConditionVer ret={lRet} msg={sMsg}")
             condition_event("OnReceiveConditionVer", ret=int(lRet), msg=str(sMsg))
+            self.condition_raw_log.emit(f"[조건] OnReceiveConditionVer ret={lRet} msg={sMsg}")
             if lRet == 1:
                 previous_len = len(self.conditions)
                 parsed = self.fetch_condition_list(apply=False)
@@ -516,6 +535,10 @@ else:
                 next=str(next_),
                 codeList=str(code_list),
             )
+            code_count = len([c for c in str(code_list).split(";") if c])
+            self.condition_raw_log.emit(
+                f"[조건] TR 결과: {condition_name} idx={index} count={code_count}"
+            )
             self.last_universe = [code for code in str(code_list).split(";") if code]
             self.tr_condition_received.emit(str(screen_no), str(code_list), str(condition_name), int(index), str(next_))
 
@@ -529,6 +552,9 @@ else:
                 eventType=str(event),
                 conditionName=str(condition_name),
                 conditionIndex=str(condition_index),
+            )
+            self.condition_raw_log.emit(
+                f"[조건] RealCondition code={code} event={event} cond={condition_name} idx={condition_index}"
             )
             self.real_condition_received.emit(str(code), str(event), str(condition_name), str(condition_index))
 

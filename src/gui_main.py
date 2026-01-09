@@ -56,6 +56,7 @@ from .trade_engine import TradeEngine
 from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
+from .logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,11 @@ class MainWindow(QMainWindow):
         self.builder_tokens: list[dict] = []
         self.condition_universe: set[str] = set()
         self.condition_universe_today: set[str] = set()
+        self._last_send_condition_ret: int | None = None
+        self._last_selected_condition_name: str | None = None
+        self._last_selected_condition_idx: int | None = None
+        self._last_tr_condition_ts: float | None = None
+        self._last_real_condition_ts: float | None = None
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
@@ -649,6 +655,8 @@ class MainWindow(QMainWindow):
             self.openapi_widget.server_gubun_changed.connect(self._on_server_gubun_changed)
         if self.openapi_widget and hasattr(self.openapi_widget, "password_required"):
             self.openapi_widget.password_required.connect(self._on_password_required)
+        if self.openapi_widget and hasattr(self.openapi_widget, "condition_raw_log"):
+            self.openapi_widget.condition_raw_log.connect(self._on_condition_raw_log)
 
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
@@ -929,6 +937,7 @@ class MainWindow(QMainWindow):
             f"[COND_EVT] 초기 조회 결과 수신 cond={name_key}({label}) idx={index} count={len(codes)}"
         )
         self._last_cond_event_ts = time.time()
+        self._last_tr_condition_ts = time.time()
         self._warned_no_cond_event = False
         self._recompute_universe()
 
@@ -949,6 +958,7 @@ class MainWindow(QMainWindow):
             f"[COND_EVT] {action}: {code} (조건 {name_key}/{label}/{condition_index})"
         )
         self._last_cond_event_ts = time.time()
+        self._last_real_condition_ts = time.time()
         self._warned_no_cond_event = False
         self._recompute_universe()
 
@@ -992,6 +1002,10 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_password_required(self, message: str) -> None:
         self._log(f"[실거래] {message}")
+
+    @pyqtSlot(str)
+    def _on_condition_raw_log(self, line: str) -> None:
+        self._log(line)
 
     @pyqtSlot(str, dict)
     def _on_real_data_received(self, code: str, payload: dict) -> None:
@@ -1440,6 +1454,7 @@ class MainWindow(QMainWindow):
         self.condition_universe_today = today_union if gate_ok else set()
         self.condition_universe = final_set
         rt_counts = self.condition_manager.counts()
+        openapi = getattr(self.kiwoom_client, "openapi", None)
         diag = {
             "infix": infix,
             "postfix": postfix_txt,
@@ -1454,6 +1469,13 @@ class MainWindow(QMainWindow):
             "rt_set_count": len(rt_set),
             "today_union_count": len(today_union),
             "final_set_count": len(final_set),
+            "connected": bool(getattr(openapi, "connected", False)) if openapi else False,
+            "conditions_loaded": bool(getattr(openapi, "conditions_loaded", False)) if openapi else False,
+            "selected_condition_name": self._last_selected_condition_name,
+            "selected_condition_idx": self._last_selected_condition_idx,
+            "send_condition_ret": self._last_send_condition_ret,
+            "last_tr_condition_ts": self._last_tr_condition_ts,
+            "last_real_condition_ts": self._last_real_condition_ts,
         }
         self._last_universe_diag = diag
         self._log(
@@ -1468,6 +1490,7 @@ class MainWindow(QMainWindow):
             )
             self._log(f"[유니버스] {message}")
             self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
+            logger.info("[유니버스][diag] %s", json.dumps(diag, ensure_ascii=False))
         return final_set
 
     def _preview_candidates(self) -> None:
@@ -1519,6 +1542,9 @@ class MainWindow(QMainWindow):
                 screen_no = openapi.allocate_screen_no(idx) if hasattr(openapi, "allocate_screen_no") else openapi.screen_no
                 self.condition_screens[name] = screen_no
                 ret = openapi.send_condition(screen_no, name, idx, 1)
+                self._last_send_condition_ret = ret
+                self._last_selected_condition_name = name
+                self._last_selected_condition_idx = idx
                 self._log(
                     f"[조건] SendCondition name={name} idx={idx} screen={screen_no} search_type=1 ret={ret}"
                 )
@@ -2030,6 +2056,7 @@ class MainWindow(QMainWindow):
 def main(argv: Optional[List[str]] = None) -> None:
     """Entry point for manual GUI testing."""
 
+    configure_logging()
     app = QApplication(argv or [])
     window = MainWindow()
     window.show()

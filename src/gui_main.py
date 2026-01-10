@@ -18,6 +18,7 @@ try:
         QDialog,
         QDialogButtonBox,
         QDoubleSpinBox,
+        QFileDialog,
         QFormLayout,
         QGroupBox,
         QHBoxLayout,
@@ -31,6 +32,7 @@ try:
         QPushButton,
         QRadioButton,
         QSizePolicy,
+        QSplitter,
         QSpinBox,
         QTableWidget,
         QTableWidgetItem,
@@ -251,6 +253,9 @@ class MainWindow(QMainWindow):
         self._last_selected_condition_idx: int | None = None
         self._last_tr_condition_ts: float | None = None
         self._last_real_condition_ts: float | None = None
+        self._monitor_last_update: dict[str, float] = {}
+        self._monitor_events: list[dict] = []
+        self._universe_refresh_scheduled: bool = False
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
@@ -464,6 +469,37 @@ class MainWindow(QMainWindow):
         cond_group.setLayout(cond_layout)
         main.addWidget(cond_group)
 
+        # Condition realtime monitor (0156)
+        monitor_group = QGroupBox("조건 실시간 모니터 (0156)")
+        monitor_layout = QVBoxLayout()
+        monitor_controls = QHBoxLayout()
+        self.monitor_condition_combo = QComboBox()
+        self.monitor_condition_combo.addItem("전체", "")
+        self.monitor_refresh_btn = QPushButton("현재결과 새로고침")
+        self.monitor_reset_btn = QPushButton("이벤트 초기화")
+        self.monitor_export_btn = QPushButton("CSV 내보내기")
+        self.monitor_status_label = QLabel("마지막 수신: - / 현재 결과: 0건")
+        monitor_controls.addWidget(QLabel("조건"))
+        monitor_controls.addWidget(self.monitor_condition_combo)
+        monitor_controls.addWidget(self.monitor_refresh_btn)
+        monitor_controls.addWidget(self.monitor_reset_btn)
+        monitor_controls.addWidget(self.monitor_export_btn)
+        monitor_controls.addWidget(self.monitor_status_label)
+        monitor_layout.addLayout(monitor_controls)
+
+        splitter = QSplitter(Qt.Horizontal)
+        self.monitor_result_table = QTableWidget(0, 4)
+        self.monitor_result_table.setHorizontalHeaderLabels(["코드", "종목명", "마지막갱신", "상태"])
+        self.monitor_event_table = QTableWidget(0, 6)
+        self.monitor_event_table.setHorizontalHeaderLabels(
+            ["시각", "이벤트", "조건명", "코드", "종목명", "비고"]
+        )
+        splitter.addWidget(self.monitor_result_table)
+        splitter.addWidget(self.monitor_event_table)
+        monitor_layout.addWidget(splitter)
+        monitor_group.setLayout(monitor_layout)
+        main.addWidget(monitor_group)
+
         # Strategy parameters
         param_group = QGroupBox("전략 / 실행 설정")
         param_layout = QFormLayout()
@@ -590,6 +626,10 @@ class MainWindow(QMainWindow):
         self.wrap_btn.clicked.connect(self._wrap_selection)
         self.validate_btn.clicked.connect(self._validate_builder)
         self.clear_builder_btn.clicked.connect(self._clear_builder)
+        self.monitor_refresh_btn.clicked.connect(self._refresh_monitor_results)
+        self.monitor_reset_btn.clicked.connect(self._reset_monitor_events)
+        self.monitor_export_btn.clicked.connect(self._export_monitor_csv)
+        self.monitor_condition_combo.currentIndexChanged.connect(self._refresh_monitor_results)
         self.preset_save_btn.clicked.connect(self._on_save_preset)
         self.preset_load_btn.clicked.connect(self._on_load_preset)
         self.preset_delete_btn.clicked.connect(self._on_delete_preset)
@@ -933,13 +973,21 @@ class MainWindow(QMainWindow):
                 )
         self.condition_manager.update_condition(name_key, codes)
         label = self._condition_id_text(name_key)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for code in codes:
+            self._monitor_last_update[code] = now_str
         self._log(
             f"[COND_EVT] 초기 조회 결과 수신 cond={name_key}({label}) idx={index} count={len(codes)}"
         )
         self._last_cond_event_ts = time.time()
         self._last_tr_condition_ts = time.time()
         self._warned_no_cond_event = False
-        self._recompute_universe()
+        note = f"TR {len(codes)}개"
+        head = ", ".join(codes[:5])
+        if head:
+            note = f"{note} head={head}"
+        self._add_monitor_event("TR", name_key, "", note=note)
+        self._schedule_universe_refresh()
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
@@ -954,13 +1002,15 @@ class MainWindow(QMainWindow):
         self.condition_manager.apply_event(name_key, code, event)
         action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
         label = self._condition_id_text(name_key)
+        self._monitor_last_update[code] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._log(
             f"[COND_EVT] {action}: {code} (조건 {name_key}/{label}/{condition_index})"
         )
         self._last_cond_event_ts = time.time()
         self._last_real_condition_ts = time.time()
         self._warned_no_cond_event = False
-        self._recompute_universe()
+        self._add_monitor_event(event, name_key, code, note=label)
+        self._schedule_universe_refresh()
 
     def _recompute_universe(self) -> None:
         final_set = self._evaluate_universe(log_prefix="EVAL")
@@ -968,6 +1018,25 @@ class MainWindow(QMainWindow):
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if openapi:
             openapi.set_real_reg(list(final_set))
+
+    def _schedule_universe_refresh(self) -> None:
+        if self._universe_refresh_scheduled:
+            return
+        self._universe_refresh_scheduled = True
+
+        def _run() -> None:
+            self._universe_refresh_scheduled = False
+            self._refresh_universe_from_conditions()
+
+        QTimer.singleShot(300, _run)
+
+    def _refresh_universe_from_conditions(self) -> None:
+        final_set = self._evaluate_universe(log_prefix="EVAL")
+        self.engine.set_external_universe(list(final_set))
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if openapi:
+            openapi.set_real_reg(list(final_set))
+        self._refresh_monitor_results()
 
     @pyqtSlot(list)
     def _on_accounts_received(self, accounts: list) -> None:
@@ -1899,6 +1968,90 @@ class MainWindow(QMainWindow):
         dialog = TradeHistoryDialog(self.history_store, self)
         dialog.exec_()
 
+    def _add_monitor_event(self, event_type: str, condition_name: str, code: str, note: str = "") -> None:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        name = self._get_symbol_name(code) if code else ""
+        row = {
+            "ts": ts,
+            "event": event_type,
+            "condition": condition_name,
+            "code": code,
+            "name": name,
+            "note": note,
+        }
+        self._monitor_events.append(row)
+        max_rows = 2000
+        if len(self._monitor_events) > max_rows:
+            self._monitor_events = self._monitor_events[-max_rows:]
+        self._refresh_monitor_events()
+
+    def _refresh_monitor_results(self) -> None:
+        selected_name = self.monitor_condition_combo.currentData()
+        if not selected_name:
+            names = list(self.condition_manager.condition_sets_rt.keys())
+            codes = set()
+            for name in names:
+                codes |= self.condition_manager.get_bucket(name, source="rt")
+            label = "전체"
+        else:
+            codes = self.condition_manager.get_bucket(selected_name, source="rt")
+            label = str(selected_name)
+        self.monitor_result_table.setRowCount(len(codes))
+        for row_idx, code in enumerate(sorted(codes)):
+            name = self._get_symbol_name(code)
+            last_ts = self._monitor_last_update.get(code, "-")
+            status = "포함"
+            self.monitor_result_table.setItem(row_idx, 0, QTableWidgetItem(code))
+            self.monitor_result_table.setItem(row_idx, 1, QTableWidgetItem(name))
+            self.monitor_result_table.setItem(row_idx, 2, QTableWidgetItem(str(last_ts)))
+            self.monitor_result_table.setItem(row_idx, 3, QTableWidgetItem(status))
+        self.monitor_result_table.resizeColumnsToContents()
+        last_event = self._monitor_events[-1]["ts"] if self._monitor_events else "-"
+        self.monitor_status_label.setText(
+            f"마지막 수신: {last_event} / {label} 결과: {len(codes)}건"
+        )
+
+    def _refresh_monitor_events(self) -> None:
+        rows = self._monitor_events
+        self.monitor_event_table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            self.monitor_event_table.setItem(row_idx, 0, QTableWidgetItem(row["ts"]))
+            self.monitor_event_table.setItem(row_idx, 1, QTableWidgetItem(row["event"]))
+            self.monitor_event_table.setItem(row_idx, 2, QTableWidgetItem(row["condition"]))
+            self.monitor_event_table.setItem(row_idx, 3, QTableWidgetItem(row["code"]))
+            self.monitor_event_table.setItem(row_idx, 4, QTableWidgetItem(row["name"]))
+            self.monitor_event_table.setItem(row_idx, 5, QTableWidgetItem(row["note"]))
+        self.monitor_event_table.resizeColumnsToContents()
+
+    def _reset_monitor_events(self) -> None:
+        self._monitor_events = []
+        self.monitor_event_table.setRowCount(0)
+        self.monitor_status_label.setText("마지막 수신: - / 현재 결과: 0건")
+
+    def _export_monitor_csv(self) -> None:
+        base_path, _ = QFileDialog.getSaveFileName(self, "CSV 저장", "", "CSV Files (*.csv)")
+        if not base_path:
+            return
+        base = base_path.rsplit(".csv", 1)[0]
+        result_path = base + "_current.csv"
+        event_path = base + "_events.csv"
+        self._export_table_csv(self.monitor_result_table, result_path)
+        self._export_table_csv(self.monitor_event_table, event_path)
+        self._log(f"[모니터] CSV 저장 완료: {result_path}, {event_path}")
+
+    def _export_table_csv(self, table: QTableWidget, path: str) -> None:
+        import csv
+
+        headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(headers)
+            for row in range(table.rowCount()):
+                values = []
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    values.append(item.text() if item else "")
+                writer.writerow(values)
     def _get_symbol_name(self, code: str) -> str:
         if code in self._name_cache:
             return self._name_cache[code]
@@ -2006,6 +2159,9 @@ class MainWindow(QMainWindow):
         self.trigger_combo.clear()
         self.trigger_combo.addItem("(사용 안 함)", "")
         self.today_candidate_list.clear()
+        self.monitor_condition_combo.blockSignals(True)
+        self.monitor_condition_combo.clear()
+        self.monitor_condition_combo.addItem("전체", "")
         self.condition_map.clear()
         self.all_conditions = [(int(idx), name) for idx, name in conditions]
         for idx, name in self.all_conditions:
@@ -2019,6 +2175,8 @@ class MainWindow(QMainWindow):
             cand_item.setData(Qt.UserRole, name)
             cand_item.setCheckState(Qt.Unchecked)
             self.today_candidate_list.addItem(cand_item)
+            self.monitor_condition_combo.addItem(f"{idx}: {name}", name)
+        self.monitor_condition_combo.blockSignals(False)
 
         if not self._pending_trigger_name:
             self._pending_trigger_name = str(self.settings.value("universe/trigger", "") or "")

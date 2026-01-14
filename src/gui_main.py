@@ -53,7 +53,7 @@ from .kiwoom_client import KiwoomClient
 from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
 from .paper_broker import PaperBroker
 from .selector import UniverseSelector
-from .strategy import Strategy
+from .strategy import Strategy, Order
 from .trade_engine import TradeEngine
 from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
@@ -253,9 +253,11 @@ class MainWindow(QMainWindow):
         self._last_selected_condition_idx: int | None = None
         self._last_tr_condition_ts: float | None = None
         self._last_real_condition_ts: float | None = None
-        self._monitor_last_update: dict[str, float] = {}
+        self._monitor_last_update: dict[str, str] = {}
         self._monitor_events: list[dict] = []
         self._universe_refresh_scheduled: bool = False
+        self.universe_mode: str = "condition"
+        self.test_universe: set[str] = set()
         self.enforce_market_hours: bool = True
         self.market_start = datetime.time(9, 0)
         self.market_end = datetime.time(15, 20)
@@ -408,6 +410,13 @@ class MainWindow(QMainWindow):
         self.allow_premarket_monitor_checkbox.setChecked(True)
 
         left_panel = QVBoxLayout()
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("유니버스 모드"))
+        self.universe_mode_combo = QComboBox()
+        self.universe_mode_combo.addItem("조건검색 모드", "condition")
+        self.universe_mode_combo.addItem("테스트 모드", "test")
+        mode_row.addWidget(self.universe_mode_combo)
+        left_panel.addLayout(mode_row)
         left_panel.addWidget(QLabel("조건식 목록"))
         left_panel.addWidget(self.condition_list)
         btn_row = QHBoxLayout()
@@ -421,6 +430,37 @@ class MainWindow(QMainWindow):
         gate_layout.addRow(self.gate_after_trigger_checkbox)
         gate_layout.addRow(self.allow_premarket_monitor_checkbox)
         left_panel.addLayout(gate_layout)
+
+        self.test_group = QGroupBox("테스트 유니버스")
+        test_layout = QVBoxLayout()
+        input_row = QHBoxLayout()
+        self.test_symbol_input = QLineEdit()
+        self.test_symbol_input.setPlaceholderText("005930 또는 005930,000660")
+        self.test_add_btn = QPushButton("추가")
+        self.test_add_bulk_btn = QPushButton("일괄 추가")
+        input_row.addWidget(self.test_symbol_input)
+        input_row.addWidget(self.test_add_btn)
+        input_row.addWidget(self.test_add_bulk_btn)
+        test_layout.addLayout(input_row)
+        self.test_universe_list = QListWidget()
+        test_layout.addWidget(self.test_universe_list)
+        action_row = QHBoxLayout()
+        self.test_remove_btn = QPushButton("삭제")
+        self.test_clear_btn = QPushButton("전체삭제")
+        action_row.addWidget(self.test_remove_btn)
+        action_row.addWidget(self.test_clear_btn)
+        test_layout.addLayout(action_row)
+        self.test_dry_run_checkbox = QCheckBox("DRY_RUN (실주문 전송 안 함)")
+        self.test_dry_run_checkbox.setChecked(True)
+        test_layout.addWidget(self.test_dry_run_checkbox)
+        force_row = QHBoxLayout()
+        self.test_force_buy_btn = QPushButton("강제 매수(테스트)")
+        self.test_force_sell_btn = QPushButton("강제 매도(테스트)")
+        force_row.addWidget(self.test_force_buy_btn)
+        force_row.addWidget(self.test_force_sell_btn)
+        test_layout.addLayout(force_row)
+        self.test_group.setLayout(test_layout)
+        left_panel.addWidget(self.test_group)
 
         # Expression builder strip
         right_panel = QVBoxLayout()
@@ -630,6 +670,13 @@ class MainWindow(QMainWindow):
         self.monitor_reset_btn.clicked.connect(self._reset_monitor_events)
         self.monitor_export_btn.clicked.connect(self._export_monitor_csv)
         self.monitor_condition_combo.currentIndexChanged.connect(self._refresh_monitor_results)
+        self.universe_mode_combo.currentIndexChanged.connect(self._on_universe_mode_changed)
+        self.test_add_btn.clicked.connect(self._add_test_symbols)
+        self.test_add_bulk_btn.clicked.connect(self._add_test_symbols_bulk)
+        self.test_remove_btn.clicked.connect(self._remove_test_symbol)
+        self.test_clear_btn.clicked.connect(self._clear_test_symbols)
+        self.test_force_buy_btn.clicked.connect(self._force_test_buy)
+        self.test_force_sell_btn.clicked.connect(self._force_test_sell)
         self.preset_save_btn.clicked.connect(self._on_save_preset)
         self.preset_load_btn.clicked.connect(self._on_load_preset)
         self.preset_delete_btn.clicked.connect(self._on_delete_preset)
@@ -711,6 +758,8 @@ class MainWindow(QMainWindow):
             self.paper_radio.setChecked(True)
         self._load_strategy_settings()
         self._load_universe_settings()
+        self._load_test_universe()
+        self._apply_universe_mode()
         self._apply_mode_enable()
         self._save_current_settings()
 
@@ -796,6 +845,7 @@ class MainWindow(QMainWindow):
         mode = self._settings_mode()
         prefix = f"strategy/{mode}/"
         self.settings.setValue("ui/mode", mode)
+        self.settings.setValue("ui/universe_mode", self.universe_mode)
         self.settings.setValue(prefix + "stop_loss_pct", self.stop_loss_input.value())
         self.settings.setValue(prefix + "take_profit_pct", self.take_profit_input.value())
         self.settings.setValue(prefix + "trailing_pct", self.trailing_input.value())
@@ -819,6 +869,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue(uni_prefix + "allow_premarket", self.allow_premarket_monitor_checkbox.isChecked())
         self.settings.setValue(uni_prefix + "rebuy_after_sell", self.rebuy_after_sell_checkbox.isChecked())
         self.settings.setValue(uni_prefix + "max_buy_per_symbol_today", self.max_buy_per_symbol_spin.value())
+        self.settings.setValue("test/universe", ",".join(sorted(self.test_universe)))
         self.settings.sync()
 
     def _apply_mode_enable(self) -> None:
@@ -831,6 +882,35 @@ class MainWindow(QMainWindow):
         else:
             self.real_balance_label.setStyleSheet("color: black;")
             self.account_pw_input.setEnabled(True)
+
+    def _load_test_universe(self) -> None:
+        raw = self.settings.value("test/universe", "") or ""
+        self.test_universe = {s.strip() for s in str(raw).split(",") if s.strip()}
+        self._refresh_test_list()
+        saved_mode = self.settings.value("ui/universe_mode", "condition")
+        idx = self.universe_mode_combo.findData(saved_mode)
+        if idx >= 0:
+            self.universe_mode_combo.setCurrentIndex(idx)
+
+    def _apply_universe_mode(self) -> None:
+        mode = self.universe_mode_combo.currentData() or "condition"
+        self.universe_mode = str(mode)
+        self._log(f"[MODE] universe_mode={self.universe_mode}")
+        is_test = self.universe_mode == "test"
+        for widget in (
+            self.refresh_conditions_btn,
+            self.run_condition_btn,
+            self.preview_candidates_btn,
+            self.add_selected_btn,
+            self.wrap_btn,
+            self.validate_btn,
+            self.clear_builder_btn,
+        ):
+            widget.setEnabled(not is_test)
+        self.test_group.setEnabled(is_test)
+        if is_test:
+            self.engine.set_external_universe(list(self.test_universe))
+        self._save_current_settings()
 
     def _apply_parameters_from_controls(self) -> None:
         params = dict(
@@ -896,6 +976,99 @@ class MainWindow(QMainWindow):
             max_buy_per_symbol_today=self.max_buy_per_symbol_spin.value(),
         )
         self._save_current_settings()
+
+    def _on_universe_mode_changed(self) -> None:
+        self._apply_universe_mode()
+
+    def _normalize_symbol(self, text: str) -> str:
+        text = text.strip().replace("A", "")
+        return text
+
+    def _refresh_test_list(self) -> None:
+        self.test_universe_list.clear()
+        for symbol in sorted(self.test_universe):
+            self.test_universe_list.addItem(symbol)
+
+    def _add_test_symbols(self) -> None:
+        raw = self.test_symbol_input.text().strip()
+        if not raw:
+            return
+        symbol = self._normalize_symbol(raw.split(",")[0])
+        if symbol:
+            self.test_universe.add(symbol)
+            self._log(f"[TEST_UNIVERSE] add {symbol}")
+        self.test_symbol_input.clear()
+        self._refresh_test_list()
+        self._save_current_settings()
+
+    def _add_test_symbols_bulk(self) -> None:
+        raw = self.test_symbol_input.text().strip()
+        if not raw:
+            return
+        parts = [self._normalize_symbol(p) for p in raw.replace("\n", ",").split(",")]
+        added = [p for p in parts if p]
+        for symbol in added:
+            self.test_universe.add(symbol)
+        if added:
+            self._log(f"[TEST_UNIVERSE] add_bulk {added}")
+        self.test_symbol_input.clear()
+        self._refresh_test_list()
+        self._save_current_settings()
+
+    def _remove_test_symbol(self) -> None:
+        item = self.test_universe_list.currentItem()
+        if not item:
+            return
+        symbol = item.text().strip()
+        if symbol in self.test_universe:
+            self.test_universe.remove(symbol)
+            self._log(f"[TEST_UNIVERSE] remove {symbol}")
+        self._refresh_test_list()
+        self._save_current_settings()
+
+    def _clear_test_symbols(self) -> None:
+        self.test_universe.clear()
+        self._log("[TEST_UNIVERSE] cleared")
+        self._refresh_test_list()
+        self._save_current_settings()
+
+    def _force_test_buy(self) -> None:
+        if self.universe_mode != "test":
+            self._log("[TEST_FORCE_BUY] 테스트 모드에서만 실행됩니다.")
+            return
+        item = self.test_universe_list.currentItem()
+        if not item:
+            self._log("[TEST_FORCE_BUY] 종목을 선택하세요.")
+            return
+        symbol = item.text().strip()
+        price = self.engine.get_current_price(symbol)
+        order = Order(side="buy", symbol=symbol, quantity=1, price=price)
+        dry_run = self.test_dry_run_checkbox.isChecked()
+        self._log(
+            f"[TEST_FORCE_BUY] symbol={symbol} price={price:.2f} qty=1 dry_run={dry_run}"
+        )
+        self.engine._execute_orders([order], allow_orders=not dry_run)
+
+    def _force_test_sell(self) -> None:
+        if self.universe_mode != "test":
+            self._log("[TEST_FORCE_SELL] 테스트 모드에서만 실행됩니다.")
+            return
+        item = self.test_universe_list.currentItem()
+        if not item:
+            self._log("[TEST_FORCE_SELL] 종목을 선택하세요.")
+            return
+        symbol = item.text().strip()
+        pos = self.strategy.positions.get(symbol)
+        if not pos:
+            self._log(f"[TEST_FORCE_SELL] 보유 중인 종목이 아닙니다: {symbol}")
+            return
+        price = self.engine.get_current_price(symbol)
+        order = Order(side="sell", symbol=symbol, quantity=pos.quantity, price=price)
+        dry_run = self.test_dry_run_checkbox.isChecked()
+        self._log(
+            f"[TEST_FORCE_SELL] symbol={symbol} price={price:.2f} qty={pos.quantity} dry_run={dry_run}"
+        )
+        self.engine._execute_orders([order], allow_orders=not dry_run)
 
     def _on_buy_order_mode_changed(self) -> None:
         mode = self.buy_order_mode_combo.currentData()
@@ -1573,6 +1746,9 @@ class MainWindow(QMainWindow):
     def _execute_condition(self) -> None:
         """Run the selected condition via OpenAPI (조회 + 실시간 등록)."""
 
+        if self.universe_mode == "test":
+            self._log("[MODE] 테스트 모드에서는 조건 실행을 사용할 수 없습니다.")
+            return
         openapi = getattr(self.kiwoom_client, "openapi", None)
         if not openapi or not openapi.is_enabled():
             self._log("조건식 기능을 사용할 수 없습니다. (OpenAPI 컨트롤 생성 실패)")
@@ -1665,25 +1841,30 @@ class MainWindow(QMainWindow):
             self._log_market_guard(reason, now)
             return
 
-        if not self.condition_universe:
-            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
-            diag = self._last_universe_diag or {}
-            reason = diag.get("reason")
-            message = diag.get("message", "")
-            if not reason:
-                reason, message = classify_universe_empty(diag)
-            self._log(
-                message
-                or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
-            )
-            self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
+        universe, source = self._current_universe()
+        self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
+        if not universe:
+            if source == "test":
+                self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
+            else:
+                self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+                diag = self._last_universe_diag or {}
+                reason = diag.get("reason")
+                message = diag.get("message", "")
+                if not reason:
+                    reason, message = classify_universe_empty(diag)
+                self._log(
+                    message
+                    or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+                )
+                self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
             return
 
-        self.engine.set_external_universe(list(self.condition_universe))
+        self.engine.set_external_universe(list(universe))
         self._log(
-            f"[AUTO] external_universe_count={len(self.condition_universe)} mode={self.engine.broker_mode}"
+            f"[AUTO] external_universe_count={len(universe)} mode={self.engine.broker_mode}"
         )
-        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
+        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
         allow_orders = self.trading_orders_enabled or open_flag
         if not allow_orders:
             self._log("[자동매매] 주문 비활성 상태 → 평가만 수행 또는 스킵")
@@ -1774,29 +1955,34 @@ class MainWindow(QMainWindow):
             self._log(
                 f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
             )
-        if not self.condition_universe:
-            self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
-            diag = self._last_universe_diag or {}
-            reason = diag.get("reason")
-            message = diag.get("message", "")
-            if not reason:
-                reason, message = classify_universe_empty(diag)
-            self._log(
-                message
-                or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
-            )
-            self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
+        universe, source = self._current_universe()
+        self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
+        if not universe:
+            if source == "test":
+                self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
+            else:
+                self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+                diag = self._last_universe_diag or {}
+                reason = diag.get("reason")
+                message = diag.get("message", "")
+                if not reason:
+                    reason, message = classify_universe_empty(diag)
+                self._log(
+                    message
+                    or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+                )
+                self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
             self._refresh_positions(market_open=self._is_market_open())
             return
-        self.engine.set_external_universe(list(self.condition_universe))
+        self.engine.set_external_universe(list(universe))
         if self.enforce_market_hours:
             allow_orders = self.trading_orders_enabled and open_flag
         else:
             allow_orders = self.trading_orders_enabled
         self._log(
-            f"[AUTO] broker_mode={self.engine.broker_mode} open_flag={open_flag} enforce_market_hours={self.enforce_market_hours} allow_orders={allow_orders} universe={len(self.condition_universe)} holdings={len(self.strategy.positions)} max_positions={self.strategy.max_positions}"
+            f"[AUTO] broker_mode={self.engine.broker_mode} open_flag={open_flag} enforce_market_hours={self.enforce_market_hours} allow_orders={allow_orders} universe={len(universe)} holdings={len(self.strategy.positions)} max_positions={self.strategy.max_positions}"
         )
-        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(self.condition_universe)}건)")
+        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
         if not allow_orders:
             self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
         self.engine.run_once("combined", allow_orders=allow_orders)
@@ -1820,6 +2006,11 @@ class MainWindow(QMainWindow):
         return True, (
             f"정규장 중 (now={now.strftime('%Y-%m-%d %H:%M:%S')} weekday={weekday} range={self.market_start}-{self.market_end})"
         ), now
+
+    def _current_universe(self) -> tuple[set[str], str]:
+        if self.universe_mode == "test":
+            return set(self.test_universe), "test"
+        return set(self.condition_universe), "condition"
 
     def _is_market_open(self) -> bool:
         open_flag, _, _ = self._market_state()

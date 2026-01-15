@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 import time
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 try:
     from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
@@ -281,6 +281,8 @@ class MainWindow(QMainWindow):
         self._last_universe_diag: dict = {}
         self._last_cond_event_ts: float | None = None
         self._warned_no_cond_event: bool = False
+        self._engine_busy: bool = False
+        self._status_before_busy: Optional[str] = None
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -594,6 +596,15 @@ class MainWindow(QMainWindow):
 
         self.auto_start_btn = QPushButton("매수 시작 (자동)")
         self.auto_stop_btn = QPushButton("매수 종료 (자동)")
+
+        self._engine_action_buttons = [
+            self.test_force_buy_btn,
+            self.test_force_sell_btn,
+            self.test_btn,
+            self.auto_start_btn,
+            self.auto_stop_btn,
+            self.apply_btn,
+        ]
 
         self.dirty_label = QLabel("⚠ 전략 설정이 변경되었지만 아직 적용되지 않았습니다. [전략 적용]을 눌러주세요.")
         self.dirty_label.setStyleSheet("color: red;")
@@ -1099,14 +1110,21 @@ class MainWindow(QMainWindow):
         if not item:
             self._log("[TEST_FORCE_BUY] 종목을 선택하세요.")
             return
+
         symbol = item.text().strip()
-        price = self.engine.get_current_price(symbol)
-        order = Order(side="buy", symbol=symbol, quantity=1, price=price)
-        dry_run = self.test_dry_run_checkbox.isChecked()
-        self._log(
-            f"[TEST_FORCE_BUY] symbol={symbol} price={price:.2f} qty=1 dry_run={dry_run}"
-        )
-        self.engine._execute_orders([order], allow_orders=not dry_run)
+
+        def run() -> None:
+            price = self.engine.get_current_price(symbol)
+            order = Order(side="buy", symbol=symbol, quantity=1, price=price)
+            dry_run = self.test_dry_run_checkbox.isChecked()
+            self._log(
+                f"[TEST_FORCE_BUY] symbol={symbol} price={price:.2f} qty=1 dry_run={dry_run}"
+            )
+            self.engine._execute_orders([order], allow_orders=not dry_run)
+            self._refresh_account_and_positions()
+            QTimer.singleShot(200, self._refresh_account_and_positions)
+
+        self._run_engine_task("TEST_FORCE_BUY", run)
 
     def _force_test_sell(self) -> None:
         if self.universe_mode != "test":
@@ -1121,13 +1139,19 @@ class MainWindow(QMainWindow):
         if not pos:
             self._log(f"[TEST_FORCE_SELL] 보유 중인 종목이 아닙니다: {symbol}")
             return
-        price = self.engine.get_current_price(symbol)
-        order = Order(side="sell", symbol=symbol, quantity=pos.quantity, price=price)
-        dry_run = self.test_dry_run_checkbox.isChecked()
-        self._log(
-            f"[TEST_FORCE_SELL] symbol={symbol} price={price:.2f} qty={pos.quantity} dry_run={dry_run}"
-        )
-        self.engine._execute_orders([order], allow_orders=not dry_run)
+
+        def run() -> None:
+            price = self.engine.get_current_price(symbol)
+            order = Order(side="sell", symbol=symbol, quantity=pos.quantity, price=price)
+            dry_run = self.test_dry_run_checkbox.isChecked()
+            self._log(
+                f"[TEST_FORCE_SELL] symbol={symbol} price={price:.2f} qty={pos.quantity} dry_run={dry_run}"
+            )
+            self.engine._execute_orders([order], allow_orders=not dry_run)
+            self._refresh_account_and_positions()
+            QTimer.singleShot(200, self._refresh_account_and_positions)
+
+        self._run_engine_task("TEST_FORCE_SELL", run)
 
     def _on_buy_order_mode_changed(self) -> None:
         mode = self.buy_order_mode_combo.currentData()
@@ -1895,42 +1919,45 @@ class MainWindow(QMainWindow):
             self._log("[주문] 실주문 비활성화 상태 → 테스트 실행 차단")
             return
 
-        open_flag, reason, now = self._market_state()
-        if self.enforce_market_hours and not open_flag:
-            self._log_market_guard(reason, now)
-            return
+        def run() -> None:
+            open_flag, reason, now = self._market_state()
+            if self.enforce_market_hours and not open_flag:
+                self._log_market_guard(reason, now)
+                return
 
-        universe, source = self._current_universe()
-        self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
-        if not universe:
-            if source == "test":
-                self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
-            else:
-                self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
-                diag = self._last_universe_diag or {}
-                reason = diag.get("reason")
-                message = diag.get("message", "")
-                if not reason:
-                    reason, message = classify_universe_empty(diag)
-                self._log(
-                    message
-                    or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
-                )
-                self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
-            return
+            universe, source = self._current_universe()
+            self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
+            if not universe:
+                if source == "test":
+                    self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
+                else:
+                    self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+                    diag = self._last_universe_diag or {}
+                    reason = diag.get("reason")
+                    message = diag.get("message", "")
+                    if not reason:
+                        reason, message = classify_universe_empty(diag)
+                    self._log(
+                        message
+                        or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+                    )
+                    self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
+                return
 
-        self.engine.set_external_universe(list(universe))
-        self._log(
-            f"[AUTO] external_universe_count={len(universe)} mode={self.engine.broker_mode}"
-        )
-        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
-        allow_orders = self.trading_orders_enabled or open_flag
-        if not allow_orders:
-            self._log("[자동매매] 주문 비활성 상태 → 평가만 수행 또는 스킵")
-        self.engine.run_once("combined", allow_orders=allow_orders)
-        self._refresh_account()
-        self._refresh_positions(market_open=self._is_market_open())
-        self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
+            self.engine.set_external_universe(list(universe))
+            self._log(
+                f"[AUTO] external_universe_count={len(universe)} mode={self.engine.broker_mode}"
+            )
+            self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
+            allow_orders = self.trading_orders_enabled or open_flag
+            if not allow_orders:
+                self._log("[자동매매] 주문 비활성 상태 → 평가만 수행 또는 스킵")
+            self.engine.run_once("combined", allow_orders=allow_orders)
+            self._refresh_account_and_positions()
+            QTimer.singleShot(200, self._refresh_account_and_positions)
+            self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
+
+        self._run_engine_task("RUN_ONCE", run)
 
     def on_auto_start(self) -> None:
         if self.auto_timer.isActive():
@@ -1982,71 +2009,77 @@ class MainWindow(QMainWindow):
         self.trading_orders_enabled = False
 
     def _on_cycle(self) -> None:
-        self._on_eod_check()
-        if self.eod_executed_today == datetime.date.today():
+        if self._engine_busy:
+            self._log("[ENGINE_BUSY] skip: already running (context=AUTO_CYCLE)")
             return
-        open_flag, reason, now = self._market_state()
-        allow_orders = True
 
-        # 장 상태 변경 감지 (once per transition)
-        if self._last_open_flag is None:
-            self._last_open_flag = open_flag
-        elif self._last_open_flag != open_flag:
-            self._last_open_flag = open_flag
-            if open_flag:
-                self.trading_orders_enabled = True
-                self.auto_trading_armed = False
-                self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
-            else:
-                if self.enforce_market_hours:
-                    self.trading_orders_enabled = False
-                self.auto_trading_armed = True
-                self._log_market_guard(reason, now)
-
-        if not open_flag:
-            if not self.allow_premarket_monitor_checkbox.isChecked():
-                self._log_market_guard(reason, now)
-                self._refresh_positions(market_open=False)
+        def run() -> None:
+            self._on_eod_check()
+            if self.eod_executed_today == datetime.date.today():
                 return
-            self._log_market_guard(reason, now)
-            if self.enforce_market_hours:
-                allow_orders = False
-            self._log(
-                f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
-            )
-        universe, source = self._current_universe()
-        self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
-        if not universe:
-            if source == "test":
-                self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
-            else:
-                self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
-                diag = self._last_universe_diag or {}
-                reason = diag.get("reason")
-                message = diag.get("message", "")
-                if not reason:
-                    reason, message = classify_universe_empty(diag)
+            open_flag, reason, now = self._market_state()
+            allow_orders = True
+
+            # 장 상태 변경 감지 (once per transition)
+            if self._last_open_flag is None:
+                self._last_open_flag = open_flag
+            elif self._last_open_flag != open_flag:
+                self._last_open_flag = open_flag
+                if open_flag:
+                    self.trading_orders_enabled = True
+                    self.auto_trading_armed = False
+                    self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
+                else:
+                    if self.enforce_market_hours:
+                        self.trading_orders_enabled = False
+                    self.auto_trading_armed = True
+                    self._log_market_guard(reason, now)
+
+            if not open_flag:
+                if not self.allow_premarket_monitor_checkbox.isChecked():
+                    self._log_market_guard(reason, now)
+                    self._refresh_positions(market_open=False)
+                    return
+                self._log_market_guard(reason, now)
+                if self.enforce_market_hours:
+                    allow_orders = False
                 self._log(
-                    message
-                    or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+                    f"[장시간] 장전 감시 중: 조건 누적은 계속, 주문만 스킵(now={now.strftime('%Y-%m-%d %H:%M:%S')} range={self.market_start}-{self.market_end})"
                 )
-                self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
-            self._refresh_positions(market_open=self._is_market_open())
-            return
-        self.engine.set_external_universe(list(universe))
-        if self.enforce_market_hours:
-            allow_orders = self.trading_orders_enabled and open_flag
-        else:
-            allow_orders = self.trading_orders_enabled
-        self._log(
-            f"[AUTO] broker_mode={self.engine.broker_mode} open_flag={open_flag} enforce_market_hours={self.enforce_market_hours} allow_orders={allow_orders} universe={len(universe)} holdings={len(self.strategy.positions)} max_positions={self.strategy.max_positions}"
-        )
-        self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
-        if not allow_orders:
-            self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
-        self.engine.run_once("combined", allow_orders=allow_orders)
-        self._refresh_account()
-        self._refresh_positions(market_open=self._is_market_open())
+            universe, source = self._current_universe()
+            self._log(f"[UNIVERSE_SOURCE] {source.upper()}")
+            if not universe:
+                if source == "test":
+                    self._log("[TEST_UNIVERSE] 빈 유니버스 → 매매판단 스킵")
+                else:
+                    self._log("[유니버스] 조건 결과가 없음(condition_universe empty) → 매매판단 스킵")
+                    diag = self._last_universe_diag or {}
+                    reason = diag.get("reason")
+                    message = diag.get("message", "")
+                    if not reason:
+                        reason, message = classify_universe_empty(diag)
+                    self._log(
+                        message
+                        or "[체크리스트] 조건 실행(실시간 포함) 버튼 실행 여부 / SendCondition ret=1 여부 / TR 조건결과 수신 로그를 확인하세요."
+                    )
+                    self._log(f"[유니버스][diag] {json.dumps(diag, ensure_ascii=False)}")
+                self._refresh_positions(market_open=self._is_market_open())
+                return
+            self.engine.set_external_universe(list(universe))
+            if self.enforce_market_hours:
+                allow_orders = self.trading_orders_enabled and open_flag
+            else:
+                allow_orders = self.trading_orders_enabled
+            self._log(
+                f"[AUTO] broker_mode={self.engine.broker_mode} open_flag={open_flag} enforce_market_hours={self.enforce_market_hours} allow_orders={allow_orders} universe={len(universe)} holdings={len(self.strategy.positions)} max_positions={self.strategy.max_positions}"
+            )
+            self._log(f"[유니버스] selector 사용 목록: external_universe 우선 적용 ({len(universe)}건)")
+            if not allow_orders:
+                self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
+            self.engine.run_once("combined", allow_orders=allow_orders)
+            self._refresh_account_and_positions()
+
+        self._run_engine_task("AUTO_CYCLE", run)
 
     def _market_state(self) -> tuple[bool, str, datetime.datetime]:
         now = datetime.datetime.now()
@@ -2116,6 +2149,46 @@ class MainWindow(QMainWindow):
             self.eod_executed_today = now.date()
             self._log("장 종료 청산 실행 – 모든 포지션 매도 및 자동 매매 중지")
             self.status_label.setText("상태: 매수 종료됨 (장 종료 청산)")
+
+    def _refresh_account_and_positions(self) -> None:
+        self._refresh_account()
+        self._refresh_positions(market_open=self._is_market_open())
+
+    def _set_engine_ui_busy(self, busy: bool, context: str = "") -> None:
+        if busy:
+            if self._status_before_busy is None:
+                self._status_before_busy = self.status_label.text()
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            status = f"상태: 실행 중... ({context})" if context else "상태: 실행 중..."
+            self.status_label.setText(status)
+        else:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+            if self._status_before_busy is not None:
+                self.status_label.setText(self._status_before_busy)
+                self._status_before_busy = None
+            else:
+                self.status_label.setText("상태: 대기중")
+
+        for button in getattr(self, "_engine_action_buttons", []):
+            button.setEnabled(not busy)
+
+    def _run_engine_task(self, context: str, task: Callable[[], None]) -> bool:
+        if self._engine_busy:
+            self._log(f"[ENGINE_BUSY] skip: already running (context={context})")
+            return False
+        self._engine_busy = True
+        start = time.perf_counter()
+        self._set_engine_ui_busy(True, context=context)
+        self._log(f"[ENGINE] start context={context}")
+        try:
+            task()
+            return True
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self._log(f"[ENGINE] end context={context} elapsed_ms={elapsed_ms:.1f}")
+            self._engine_busy = False
+            self._set_engine_ui_busy(False)
 
     # Rendering helpers --------------------------------------------------
     def _mark_dirty(self) -> None:

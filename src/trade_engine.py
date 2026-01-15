@@ -137,7 +137,7 @@ class TradeEngine:
             if not allow_orders:
                 if self.log_fn:
                     self.log_fn(
-                        f"[BUY] side={order.side} code={order.symbol} qty={order.quantity} price={order.price:.2f} mode={self.broker_mode} status=skipped (orders disabled)"
+                        f"[ORDER] side={order.side} code={order.symbol} qty={order.quantity} price={order.price:.2f} mode={self.broker_mode} status=skipped (orders disabled)"
                     )
                 continue
             if self.broker_mode == "real":
@@ -158,7 +158,7 @@ class TradeEngine:
                     reason = ""
                     if hasattr(self.kiwoom_client, "get_last_block_reason"):
                         reason = self.kiwoom_client.get_last_block_reason()
-                    self.log_fn(f"[BUY] blocked real order: {reason or 'unknown'}")
+                    self.log_fn(f"[ORDER] blocked real order: {reason or 'unknown'}")
                 logger.info(
                     "Executed %s %s x%d at %.2f (%s)",
                     order.side,
@@ -169,7 +169,7 @@ class TradeEngine:
                 )
                 if self.log_fn:
                     self.log_fn(
-                        f"[BUY] side={order.side} code={order.symbol} qty={broker_result.quantity} price={broker_result.price:.2f} mode=real status={broker_result.status}"
+                        f"[ORDER] side={order.side} code={order.symbol} qty={broker_result.quantity} price={broker_result.price:.2f} mode=real status={broker_result.status}"
                     )
                 continue
 
@@ -190,7 +190,7 @@ class TradeEngine:
             )
             if self.log_fn:
                 self.log_fn(
-                    f"[BUY] side={order.side} code={order.symbol} qty={filled_qty} price={fill_price:.2f} mode=paper"
+                    f"[ORDER] side={order.side} code={order.symbol} qty={filled_qty} price={fill_price:.2f} mode=paper"
                 )
 
     def _current_cash(self) -> float:
@@ -213,19 +213,19 @@ class TradeEngine:
     def _can_buy(self, symbol: str) -> bool:
         if symbol in self.strategy.positions:
             if self.log_fn:
-                self.log_fn(f"[BUY] skip {symbol}: already_holding")
+                self.log_fn(f"[ORDER] skip {symbol}: already_holding")
             return False
         self._reset_daily_if_needed()
         if not self.rebuy_after_sell_today and symbol in self.bought_today_symbols:
             if self.log_fn:
-                self.log_fn(f"[BUY] skip {symbol}: bought_today and rebuy disabled")
+                self.log_fn(f"[ORDER] skip {symbol}: bought_today and rebuy disabled")
             return False
         max_n = self.max_buy_per_symbol_today
         if max_n > 0:
             count = self.buy_count_today.get(symbol, 0)
             if count >= max_n:
                 if self.log_fn:
-                    self.log_fn(f"[BUY] skip {symbol}: max_buy_count_reached({count}/{max_n})")
+                    self.log_fn(f"[ORDER] skip {symbol}: max_buy_count_reached({count}/{max_n})")
                 return False
         return True
 

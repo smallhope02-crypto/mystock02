@@ -32,7 +32,13 @@ class KiwoomClient:
     TODO: 실제 API 연동 시 구현
     """
 
-    def __init__(self, account_no: str, app_key: str = "", app_secret: str = ""):
+    def __init__(
+        self,
+        account_no: str,
+        app_key: str = "",
+        app_secret: str = "",
+        history_store: TradeHistoryStore | None = None,
+    ):
         self.account_no = account_no
         self.app_key = app_key
         self.app_secret = app_secret
@@ -46,6 +52,8 @@ class KiwoomClient:
         self._real_orderable: int = 0
         self._real_holdings: list = []
         self._last_prices: Dict[str, float] = {}
+        self._last_block_reason: str = ""
+        self.history_store = history_store
 
     def attach_openapi(self, openapi: KiwoomOpenAPI) -> None:
         """Attach a GUI-hosted QAx Kiwoom control.
@@ -148,6 +156,61 @@ class KiwoomClient:
 
     def _on_chejan(self, payload: dict) -> None:
         logger.info("[CHEJAN] payload=%s", payload)
+        if not self.history_store:
+            return
+        raw_fids = payload.get("raw_fids") or {}
+        if not isinstance(raw_fids, dict):
+            raw_fids = {}
+
+        def get_raw(fid: int) -> str:
+            return str(raw_fids.get(str(fid), "")).strip()
+
+        def parse_int(value: str) -> int | None:
+            value = str(value).strip().replace(",", "").replace("+", "").replace("-", "")
+            if not value:
+                return None
+            try:
+                return int(float(value))
+            except Exception:
+                return None
+
+        code_raw = get_raw(9001)
+        code = code_raw.replace("A", "").strip()
+        name = get_raw(302) or None
+        order_no = get_raw(9203) or None
+        status = get_raw(913) or None
+        order_qty = parse_int(get_raw(900))
+        order_price = parse_int(get_raw(901))
+        side = get_raw(907) or None
+        exec_no = get_raw(909) or None
+        exec_price = parse_int(get_raw(910))
+        exec_qty = parse_int(get_raw(911))
+        fee = parse_int(get_raw(938))
+        tax = parse_int(get_raw(939))
+
+        if not code:
+            return
+
+        event = {
+            "mode": "real",
+            "event_type": "chejan",
+            "gubun": payload.get("gubun"),
+            "account": None,
+            "code": code,
+            "name": name,
+            "side": side,
+            "order_no": order_no,
+            "status": status,
+            "order_qty": order_qty,
+            "order_price": order_price,
+            "exec_no": exec_no,
+            "exec_price": exec_price,
+            "exec_qty": exec_qty,
+            "fee": fee,
+            "tax": tax,
+            "raw_json": TradeHistoryStore.encode_raw(raw_fids),
+        }
+        self.history_store.insert_event(event)
 
     def _fetch_balance_from_kiwoom_api(self) -> int:
         """Placeholder for the real Kiwoom balance API call.
@@ -171,16 +234,23 @@ class KiwoomClient:
         return {"cash": float(self.get_real_balance())}
 
     def _can_send_real_order(self) -> bool:
+        self._last_block_reason = ""
         if not self.openapi:
-            logger.warning("[REAL MODE] OpenAPI 미초기화로 주문 불가")
+            self._last_block_reason = "OpenAPI 미초기화로 주문 불가"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         if not getattr(self.openapi, "connected", False):
-            logger.warning("[REAL MODE] OpenAPI 미로그인 상태로 주문 불가")
+            self._last_block_reason = "OpenAPI 미로그인 상태로 주문 불가"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         if hasattr(self.openapi, "is_simulation_server") and self.openapi.is_simulation_server():
-            logger.warning("[REAL MODE] 현재 서버가 모의(raw=1) → 주문 차단")
+            self._last_block_reason = "현재 서버가 모의(raw=1) → 주문 차단"
+            logger.warning("[REAL MODE] %s", self._last_block_reason)
             return False
         return True
+
+    def get_last_block_reason(self) -> str:
+        return self._last_block_reason
 
     def list_conditions(self) -> List[str]:
         """Return only condition names for backward compatibility."""
@@ -243,7 +313,17 @@ class KiwoomClient:
             # 로그인 이벤트에서 조건 로딩을 시작하지만, 즉시 호출해도 안전하다.
             self.openapi.load_conditions()
 
-    def send_buy_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
+    def send_buy_order(
+        self, symbol: str, quantity: int, price: float, hogagb: str = "00", expected_price: float | None = None
+    ) -> OrderResult:
+        """Send a buy order through OpenAPI.
+
+        ``hogagb`` supports ``"03"`` for market and ``"00"`` for limit. ``price``
+        should be 0 for market orders when calling the API, but ``expected_price``
+        is kept for reporting and strategy fills.
+        """
+
+        display_price = expected_price if expected_price is not None else price
         if self._can_send_real_order():
             ok = False
             if hasattr(self.openapi, "send_order"):
@@ -256,15 +336,15 @@ class KiwoomClient:
                         code=symbol,
                         qty=int(quantity),
                         price=int(price),
-                        hogagb="00",
+                        hogagb=hogagb,
                         org_order_no="",
                     )
                 )
             status = "accepted" if ok else "error"
-            logger.info("[REAL MODE] SendOrder buy dispatched=%s", ok)
-            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=price, status=status)
+            logger.info("[REAL MODE] SendOrder buy dispatched=%s hogagb=%s price=%s", ok, hogagb, price)
+            return OrderResult(symbol=symbol, quantity=quantity if ok else 0, price=display_price, status=status)
         logger.warning("[REAL MODE] 주문 차단 (server/mock/login 확인 필요)")
-        return OrderResult(symbol=symbol, quantity=0, price=price, status="blocked")
+        return OrderResult(symbol=symbol, quantity=0, price=display_price, status="blocked")
 
     def send_sell_order(self, symbol: str, quantity: int, price: float) -> OrderResult:
         if self._can_send_real_order():

@@ -1,7 +1,24 @@
 """Expression-based condition evaluation for AND/OR with parentheses."""
 from __future__ import annotations
 
+import datetime
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
+
+
+def _get_kst_timezone() -> datetime.tzinfo:
+    """Return Asia/Seoul if available, otherwise a fixed UTC+9 offset.
+
+    Some Windows installs lack ``tzdata`` so ``ZoneInfo('Asia/Seoul')``
+    raises ``ZoneInfoNotFoundError``. Import and fallback locally to keep
+    crashes away while still using KST semantics for day rollovers.
+    """
+
+    try:
+        from zoneinfo import ZoneInfo  # type: ignore
+
+        return ZoneInfo("Asia/Seoul")
+    except Exception:  # pragma: no cover - fallback when tzdata is missing
+        return datetime.timezone(datetime.timedelta(hours=9))
 
 
 Token = Dict[str, str]
@@ -18,8 +35,11 @@ class ConditionManager:
     PRECEDENCE = {"AND": 2, "OR": 1}
 
     def __init__(self) -> None:
-        self.condition_sets: Dict[str, Set[str]] = {}
+        self.condition_sets_rt: Dict[str, Set[str]] = {}
+        self.condition_sets_today: Dict[str, Set[str]] = {}
         self.tokens: List[Token] = []
+        self._today: datetime.date | None = None
+        self._tz = _get_kst_timezone()
 
     # ------------------------------------------------------------------
     def set_expression_tokens(self, tokens: Sequence[Token], reset_sets: bool = False) -> None:
@@ -32,31 +52,51 @@ class ConditionManager:
 
         self.tokens = list(tokens)
         active = {t.get("value") for t in self.tokens if t.get("type") == "COND" and t.get("value")}
+        self._ensure_today()
         for name in active:
-            self.condition_sets.setdefault(str(name), set())
+            key = str(name)
+            self.condition_sets_rt.setdefault(key, set())
+            self.condition_sets_today.setdefault(key, set())
         if reset_sets:
             for name in active:
-                self.condition_sets[name] = set()
+                key = str(name)
+                self.condition_sets_rt[key] = set()
 
     def reset_sets(self) -> None:
-        for key in list(self.condition_sets.keys()):
-            self.condition_sets[key] = set()
+        for key in list(self.condition_sets_rt.keys()):
+            self.condition_sets_rt[key] = set()
+            self.condition_sets_today[key] = set()
+
+    def _ensure_today(self, now: datetime.datetime | None = None) -> None:
+        now = now or datetime.datetime.now(self._tz)
+        if self._today != now.date():
+            self._today = now.date()
+            for key in list(self.condition_sets_today.keys()):
+                self.condition_sets_today[key] = set()
 
     # ------------------------------------------------------------------
     def update_condition(self, name: str, symbols: Iterable[str]) -> None:
-        self.condition_sets[str(name)] = set(symbols)
+        self._ensure_today()
+        key = str(name)
+        bucket = set(symbols)
+        self.condition_sets_rt[key] = bucket
+        today_bucket = self.condition_sets_today.setdefault(key, set())
+        today_bucket.update(bucket)
 
     def apply_event(self, name: str, code: str, event: str) -> None:
         key = str(name)
-        bucket = self.condition_sets.setdefault(key, set())
+        self._ensure_today()
+        bucket = self.condition_sets_rt.setdefault(key, set())
+        today_bucket = self.condition_sets_today.setdefault(key, set())
         if event == "I":
             bucket.add(code)
+            today_bucket.add(code)
         elif event == "D":
             bucket.discard(code)
 
     # ------------------------------------------------------------------
     def counts(self) -> Dict[str, int]:
-        return {name: len(symbols) for name, symbols in self.condition_sets.items()}
+        return {name: len(symbols) for name, symbols in self.condition_sets_rt.items()}
 
     # ------------------------------------------------------------------
     def _infix_to_postfix(self, tokens: Sequence[Token]) -> List[Token]:
@@ -85,12 +125,13 @@ class ConditionManager:
             output.append(ops.pop())
         return output
 
-    def _evaluate_postfix(self, postfix: Sequence[Token]) -> Set[str]:
+    def _evaluate_postfix(self, postfix: Sequence[Token], source: str = "rt") -> Set[str]:
         stack: List[Set[str]] = []
         for tok in postfix:
             ttype = tok.get("type")
             if ttype == "COND":
-                stack.append(set(self.condition_sets.get(str(tok.get("value")), set())))
+                src = self.condition_sets_today if source == "today" else self.condition_sets_rt
+                stack.append(set(src.get(str(tok.get("value")), set())))
             elif ttype == "OP" and len(stack) >= 2:
                 b, a = stack.pop(), stack.pop()
                 if tok.get("value") == "AND":
@@ -99,14 +140,20 @@ class ConditionManager:
                     stack.append(a | b)
         return stack[-1] if stack else set()
 
-    def evaluate(self) -> Tuple[Set[str], List[Token]]:
+    def evaluate(self, source: str = "rt") -> Tuple[Set[str], List[Token]]:
         """Return (final_set, postfix_tokens) for current tokens."""
 
+        self._ensure_today()
         if not self.tokens:
             return set(), []
         postfix = self._infix_to_postfix(self.tokens)
-        final_set = self._evaluate_postfix(postfix)
+        final_set = self._evaluate_postfix(postfix, source=source)
         return final_set, postfix
+
+    def get_bucket(self, name: str, source: str = "rt") -> Set[str]:
+        self._ensure_today()
+        src = self.condition_sets_today if source == "today" else self.condition_sets_rt
+        return set(src.get(str(name), set()))
 
     def render_infix(self, tokens: Sequence[Token] | None = None) -> str:
         src = tokens if tokens is not None else self.tokens

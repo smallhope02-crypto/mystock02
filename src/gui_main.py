@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 try:
@@ -54,6 +55,8 @@ from .condition_manager import ConditionManager
 from .kiwoom_client import KiwoomClient
 from .kiwoom_openapi import KiwoomOpenAPI, QAX_AVAILABLE
 from .paper_broker import PaperBroker
+from .opportunity_tracker import MissedOpportunityTracker
+from .scanner import ScannerConfig, ScannerEngine
 from .selector import UniverseSelector
 from .strategy import Strategy, Order
 from .trade_engine import TradeEngine
@@ -283,10 +286,19 @@ class MainWindow(QMainWindow):
         self._warned_no_cond_event: bool = False
         self._engine_busy: bool = False
         self._status_before_busy: Optional[str] = None
+        self._scanner_busy: bool = False
+        self.scanner_current_universe: list[str] = []
+        self.scanner_config = ScannerConfig()
+        self.scanner = ScannerEngine(self.selector.score_candidates, config=self.scanner_config)
+        self.opportunity_tracker = MissedOpportunityTracker(Path("logs"))
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
         self.auto_timer.setInterval(5000)
+
+        self.scanner_timer = QTimer(self)
+        self.scanner_timer.timeout.connect(self._on_scanner_cycle)
+        self.scanner_timer.setInterval(60_000)
 
         self.close_timer = QTimer(self)
         self.close_timer.timeout.connect(self._on_eod_check)
@@ -418,6 +430,7 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(QLabel("유니버스 모드"))
         self.universe_mode_combo = QComboBox()
         self.universe_mode_combo.addItem("조건검색 모드", "condition")
+        self.universe_mode_combo.addItem("스캐너 모드", "scanner")
         self.universe_mode_combo.addItem("테스트 모드", "test")
         mode_row.addWidget(self.universe_mode_combo)
         left_panel.addLayout(mode_row)
@@ -967,6 +980,7 @@ class MainWindow(QMainWindow):
         self.universe_mode = str(mode)
         self._log(f"[MODE] universe_mode={self.universe_mode}")
         is_test = self.universe_mode == "test"
+        is_scanner = self.universe_mode == "scanner"
         for widget in (
             self.refresh_conditions_btn,
             self.run_condition_btn,
@@ -980,6 +994,12 @@ class MainWindow(QMainWindow):
         self.test_group.setEnabled(is_test)
         if is_test:
             self.engine.set_external_universe(list(self.test_universe))
+        if is_scanner and self.auto_timer.isActive() and not self.scanner_timer.isActive():
+            self.scanner_timer.start()
+            self._log("스캐너 모드 스캔 타이머 시작")
+        if not is_scanner and self.scanner_timer.isActive():
+            self.scanner_timer.stop()
+            self._log("스캐너 모드 스캔 타이머 중지")
         self._save_current_settings()
 
     def _apply_parameters_from_controls(self) -> None:
@@ -1998,12 +2018,18 @@ class MainWindow(QMainWindow):
 
         self.auto_timer.start()
         self._log("자동 매매 시작 (타이머 가동)")
+        if self.universe_mode == "scanner" and not self.scanner_timer.isActive():
+            self.scanner_timer.start()
+            self._log("스캐너 모드 스캔 타이머 시작")
 
     def on_auto_stop(self) -> None:
         if self.auto_timer.isActive():
             self.auto_timer.stop()
             self.status_label.setText("상태: 매수 종료됨 (자동 정지)")
             self._log("자동 매매 정지")
+        if self.scanner_timer.isActive():
+            self.scanner_timer.stop()
+            self._log("스캐너 모드 스캔 타이머 중지")
         self.auto_trading_active = False
         self.auto_trading_armed = False
         self.trading_orders_enabled = False
@@ -2081,6 +2107,85 @@ class MainWindow(QMainWindow):
 
         self._run_engine_task("AUTO_CYCLE", run)
 
+    def _on_scanner_cycle(self) -> None:
+        if self._scanner_busy:
+            self._log("[SCANNER_BUSY] skip: already running")
+            return
+        if self._engine_busy:
+            self._log("[ENGINE_BUSY] skip: already running (context=SCANNER)")
+            return
+        if self.universe_mode != "scanner":
+            return
+
+        start = time.perf_counter()
+        self._scanner_busy = True
+        try:
+            candidates = list(self.condition_universe)
+            if not candidates:
+                self._log("[SCANNER] empty candidates → 스캔 스킵")
+                return
+            scan_result = self.scanner.scan(candidates, self.scanner_current_universe)
+            self.scanner_current_universe = scan_result.applied_universe
+            self.engine.set_external_universe(scan_result.applied_universe)
+
+            self._log(
+                f"[SCANNER] raw={scan_result.raw_count} filtered={scan_result.filtered_count} "
+                f"desired={len(scan_result.desired_universe)} current={len(scan_result.current_universe)} "
+                f"final={len(scan_result.applied_universe)}"
+            )
+            self._log(
+                f"[SCANNER_CHURN] desired_swaps={scan_result.desired_swaps} allowed={scan_result.allowed_swaps} "
+                f"override_extra={scan_result.override_extra} applied_swaps={scan_result.applied_swaps}"
+            )
+            if scan_result.override_triggered:
+                worst_incumbent = None
+                if scan_result.current_universe:
+                    incumbent_scores = [
+                        scan_result.scores.get(code, 0.0) for code in scan_result.current_universe
+                    ]
+                    worst_incumbent = min(incumbent_scores) if incumbent_scores else None
+                examples = ",".join(scan_result.missed_new_strong[:5])
+                self._log(
+                    f"[SCANNER_OVERRIDE] triggered={scan_result.override_triggered} margin={self.scanner_config.override_margin} "
+                    f"worst_incumbent={worst_incumbent} examples=[{examples}]"
+                )
+
+            if scan_result.missed_new_strong:
+                price_snapshot = self._snapshot_prices(scan_result.missed_new_strong)
+                self.opportunity_tracker.record_missed(scan_result, price_snapshot, log_fn=self._log)
+
+            self.opportunity_tracker.evaluate_pending(self._get_price_for_tracker, log_fn=self._log)
+            summary = self.opportunity_tracker.summarize(window_minutes=60)
+            if summary.get("missed_strong", 0) > 0:
+                avg_5m = summary.get("avg_5m", 0.0)
+                avg_15m = summary.get("avg_15m", 0.0)
+                pos_15m = summary.get("pos_15m", 0.0)
+                self._log(
+                    f"[OPPORTUNITY_SUMMARY] window=1h missed={summary.get('missed_strong', 0):.0f} "
+                    f"avg_5m={avg_5m:.2f} avg_15m={avg_15m:.2f} pos_15m={pos_15m:.1f}%"
+                )
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self._log(f"[SCANNER] end elapsed_ms={elapsed_ms:.1f}")
+            self._scanner_busy = False
+
+    def _snapshot_prices(self, codes: Sequence[str]) -> dict[str, Optional[float]]:
+        snapshot: dict[str, Optional[float]] = {}
+        for code in codes:
+            try:
+                snapshot[code] = self.engine.get_current_price(code)
+            except Exception as exc:  # pragma: no cover - defensive
+                snapshot[code] = None
+                self._log(f"[SCANNER] price_snapshot_failed code={code} err={exc}")
+        return snapshot
+
+    def _get_price_for_tracker(self, code: str) -> Optional[float]:
+        try:
+            return self.engine.get_current_price(code)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log(f"[OPPORTUNITY] price_fetch_failed code={code} err={exc}")
+            return None
+
     def _market_state(self) -> tuple[bool, str, datetime.datetime]:
         now = datetime.datetime.now()
         weekday = now.strftime("%a")
@@ -2102,6 +2207,8 @@ class MainWindow(QMainWindow):
     def _current_universe(self) -> tuple[set[str], str]:
         if self.universe_mode == "test":
             return set(self.test_universe), "test"
+        if self.universe_mode == "scanner":
+            return set(self.scanner_current_universe), "scanner"
         return set(self.condition_universe), "condition"
 
     def _is_market_open(self) -> bool:

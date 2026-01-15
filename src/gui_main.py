@@ -31,7 +31,9 @@ try:
         QMessageBox,
         QPushButton,
         QRadioButton,
+        QScrollArea,
         QSizePolicy,
+        QTabWidget,
         QSplitter,
         QSpinBox,
         QTableWidget,
@@ -391,11 +393,11 @@ class MainWindow(QMainWindow):
 
         # Condition selector + expression builder (group=OR buckets, between groups=AND)
         cond_group = QGroupBox("조건식 선택 / 그룹 빌더")
-        cond_layout = QHBoxLayout()
 
         self.condition_list = QListWidget()
         self.condition_list.setSelectionMode(QListWidget.MultiSelection)
-        self.condition_list.setMinimumWidth(400)
+        self.condition_list.setMinimumWidth(240)
+        self.condition_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.all_conditions: list[tuple[int, str]] = []
         self.trigger_combo = QComboBox()
         self.trigger_combo.addItem("(사용 안 함)", "")
@@ -504,10 +506,16 @@ class MainWindow(QMainWindow):
         right_panel.addWidget(QLabel("조합 미리보기 (표현식 그대로 표시)"))
         right_panel.addWidget(self.group_preview_label)
 
-        cond_layout.addLayout(left_panel)
-        cond_layout.addLayout(right_panel)
+        cond_splitter = QSplitter(Qt.Horizontal)
+        left_widget = QWidget()
+        left_widget.setLayout(left_panel)
+        right_widget = QWidget()
+        right_widget.setLayout(right_panel)
+        cond_splitter.addWidget(left_widget)
+        cond_splitter.addWidget(right_widget)
+        cond_layout = QVBoxLayout()
+        cond_layout.addWidget(cond_splitter)
         cond_group.setLayout(cond_layout)
-        main.addWidget(cond_group)
 
         # Condition realtime monitor (0156)
         monitor_group = QGroupBox("조건 실시간 모니터 (0156)")
@@ -623,17 +631,51 @@ class MainWindow(QMainWindow):
         param_layout.addRow(self.status_label)
 
         param_group.setLayout(param_layout)
-        main.addWidget(param_group)
-
         # Positions and log
         self.positions_table = QTableWidget(0, 6)
         self.positions_table.setHorizontalHeaderLabels(["종목코드", "종목명", "수량", "진입가", "최고가", "현재가/등락"])
-        main.addWidget(self.positions_table)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        main.addWidget(self.log_view)
 
+        self.main_tabs = QTabWidget()
+
+        def wrap_tab(widget: QWidget) -> QScrollArea:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(widget)
+            return area
+
+        tab_condition = QWidget()
+        tab_condition_layout = QVBoxLayout()
+        tab_condition_layout.addWidget(conn_group)
+        tab_condition_layout.addWidget(cond_group)
+        tab_condition_layout.addStretch(1)
+        tab_condition.setLayout(tab_condition_layout)
+        self.main_tabs.addTab(wrap_tab(tab_condition), "조건/유니버스")
+
+        tab_monitor = QWidget()
+        tab_monitor_layout = QVBoxLayout()
+        tab_monitor_layout.addWidget(monitor_group)
+        tab_monitor_layout.addStretch(1)
+        tab_monitor.setLayout(tab_monitor_layout)
+        self.main_tabs.addTab(wrap_tab(tab_monitor), "모니터")
+
+        tab_strategy = QWidget()
+        tab_strategy_layout = QVBoxLayout()
+        tab_strategy_layout.addWidget(param_group)
+        tab_strategy_layout.addWidget(self.positions_table)
+        tab_strategy_layout.addStretch(1)
+        tab_strategy.setLayout(tab_strategy_layout)
+        self.main_tabs.addTab(wrap_tab(tab_strategy), "전략/포지션")
+
+        tab_log = QWidget()
+        tab_log_layout = QVBoxLayout()
+        tab_log_layout.addWidget(self.log_view)
+        tab_log.setLayout(tab_log_layout)
+        self.main_tabs.addTab(wrap_tab(tab_log), "로그")
+
+        main.addWidget(self.main_tabs)
         root.setLayout(main)
         self.setCentralWidget(root)
 
@@ -761,6 +803,7 @@ class MainWindow(QMainWindow):
         self._load_test_universe()
         self._apply_universe_mode()
         self._apply_mode_enable()
+        self._restore_window_state()
         self._save_current_settings()
 
     def _load_strategy_settings(self) -> None:
@@ -882,6 +925,22 @@ class MainWindow(QMainWindow):
         else:
             self.real_balance_label.setStyleSheet("color: black;")
             self.account_pw_input.setEnabled(True)
+
+    def _restore_window_state(self) -> None:
+        geometry = self.settings.value("ui/window_geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            screen = QApplication.primaryScreen()
+            if screen:
+                rect = screen.availableGeometry()
+                self.resize(int(rect.width() * 0.9), int(rect.height() * 0.85))
+        tab_index = self.settings.value("ui/main_tab_index")
+        if tab_index is not None and hasattr(self, "main_tabs"):
+            try:
+                self.main_tabs.setCurrentIndex(int(tab_index))
+            except Exception:
+                pass
 
     def _load_test_universe(self) -> None:
         raw = self.settings.value("test/universe", "") or ""
@@ -2400,6 +2459,13 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         self.log_view.append(message)
         logger.info(message)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if hasattr(self, "main_tabs"):
+            self.settings.setValue("ui/main_tab_index", self.main_tabs.currentIndex())
+        self.settings.setValue("ui/window_geometry", self.saveGeometry())
+        self.settings.sync()
+        super().closeEvent(event)
 
 
 def main(argv: Optional[List[str]] = None) -> None:

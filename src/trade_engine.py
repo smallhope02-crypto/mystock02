@@ -1,19 +1,13 @@
 """Trade engine coordinating selector, strategy, and broker layers."""
 
-import datetime
 import logging
-try:  # tzdata optional on Windows
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
-    ZoneInfo = None  # type: ignore
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from .config import AppConfig
 from .kiwoom_client import KiwoomClient
 from .paper_broker import PaperBroker
 from .selector import UniverseSelector
 from .strategy import Order, Strategy
-from .price_tick import shift_price_by_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +30,6 @@ class TradeEngine:
         self.kiwoom_client = kiwoom_client or KiwoomClient(account_no="00000000")
         self.paper_broker = paper_broker or PaperBroker(initial_cash=self.strategy.initial_cash)
         self.log_fn = log_fn
-        self.rebuy_after_sell_today: bool = False
-        self.max_buy_per_symbol_today: int = 1
-        self.bought_today_symbols: set[str] = set()
-        self.buy_count_today: Dict[str, int] = {}
-        self._today: datetime.date | None = None
-        self._tz = self._get_kst_timezone()
-        self.buy_order_mode: str = "market"
-        self.buy_price_offset_ticks: int = 0
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 

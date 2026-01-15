@@ -76,17 +76,6 @@ class UniverseSelector:
         logger.info("Selected universe from %s: %s", condition_name, selected)
         return selected
 
-    def score_candidates(self, symbols: List[str]) -> Dict[str, float]:
-        """Return composite scores for the given symbols."""
-        if not symbols:
-            return {}
-        composite_score: Dict[str, float] = {symbol: 0.0 for symbol in symbols}
-        for scorer in self.scorers:
-            scores = scorer(symbols)
-            for symbol, value in scores.items():
-                composite_score[symbol] = composite_score.get(symbol, 0.0) + value
-        return composite_score
-
     def _load_base_universe(self, condition_name: str) -> List[str]:
         """Load a baseline universe.
 

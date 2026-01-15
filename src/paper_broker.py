@@ -4,8 +4,6 @@ import logging
 from dataclasses import dataclass
 from typing import Dict
 
-from .trade_history_store import TradeHistoryStore
-
 logger = logging.getLogger(__name__)
 
 
@@ -32,11 +30,10 @@ class PaperPosition:
 class PaperBroker:
     """Lightweight in-memory broker for paper trading."""
 
-    def __init__(self, initial_cash: float = 1_000_000, history_store: TradeHistoryStore | None = None):
+    def __init__(self, initial_cash: float = 1_000_000):
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.positions: Dict[str, PaperPosition] = {}
-        self.history_store = history_store
 
     def set_cash(self, cash: float) -> None:
         self.initial_cash = float(cash)
@@ -74,17 +71,6 @@ class PaperBroker:
             ) / new_total
         position.quantity = new_total
         logger.info("[PAPER] Bought %s x%d at %.2f", symbol, quantity, price)
-        if self.history_store and quantity:
-            self.history_store.insert_event(
-                {
-                    "mode": "paper",
-                    "event_type": "paper_fill",
-                    "code": symbol,
-                    "side": "buy",
-                    "exec_price": int(price),
-                    "exec_qty": int(quantity),
-                }
-            )
         return PaperOrderResult(symbol=symbol, quantity=quantity, price=price, status="filled")
 
     def send_sell_order(self, symbol: str, quantity: int, price: float) -> PaperOrderResult:
@@ -99,17 +85,6 @@ class PaperBroker:
         if position.quantity == 0:
             del self.positions[symbol]
         logger.info("[PAPER] Sold %s x%d at %.2f", symbol, sell_qty, price)
-        if self.history_store and sell_qty:
-            self.history_store.insert_event(
-                {
-                    "mode": "paper",
-                    "event_type": "paper_fill",
-                    "code": symbol,
-                    "side": "sell",
-                    "exec_price": int(price),
-                    "exec_qty": int(sell_qty),
-                }
-            )
         return PaperOrderResult(symbol=symbol, quantity=sell_qty, price=price, status="filled")
 
     def get_account_summary(self) -> Dict[str, float]:

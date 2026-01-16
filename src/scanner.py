@@ -69,6 +69,8 @@ class ScannerEngine:
         intraday_high: Optional[Dict[str, float]] = None,
     ) -> ScanResult:
         ts_scan = datetime.datetime.now()
+        logger.warning("[SCANNER_TR] stub_return name=trade_value_rank (no TR wired)")
+        logger.warning("[SCANNER_TR] stub_return name=change_rate_rank (no TR wired)")
         raw = list(dict.fromkeys([c for c in candidates if c]))
         raw_count = len(raw)
         filtered = raw

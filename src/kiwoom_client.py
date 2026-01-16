@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 
 from .config import AppConfig
 from .kiwoom_openapi import KiwoomOpenAPI
+from .trade_history_store import TradeHistoryStore
 
 logger = logging.getLogger(__name__)
 

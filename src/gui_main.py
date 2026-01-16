@@ -293,6 +293,7 @@ class MainWindow(QMainWindow):
         self.scanner = ScannerEngine(self.selector.score_candidates, config=self.scanner_config)
         self.opportunity_tracker = MissedOpportunityTracker(Path("logs"))
         self._last_scan_result = None
+        self._scanner_next_run_at: Optional[datetime.datetime] = None
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -301,6 +302,10 @@ class MainWindow(QMainWindow):
         self.scanner_timer = QTimer(self)
         self.scanner_timer.timeout.connect(self._on_scanner_cycle)
         self.scanner_timer.setInterval(60_000)
+        self.scan_countdown_timer = QTimer(self)
+        self.scan_countdown_timer.timeout.connect(self._update_scan_schedule_ui)
+        self.scan_countdown_timer.setInterval(1000)
+        self.scan_countdown_timer.start()
 
         self.close_timer = QTimer(self)
         self.close_timer.timeout.connect(self._on_eod_check)
@@ -483,11 +488,20 @@ class MainWindow(QMainWindow):
 
         self.scanner_health_group = QGroupBox("스캐너/매수 헬스체크")
         scanner_health_layout = QVBoxLayout()
+        self.scan_once_btn = QPushButton("지금 스캔 1회")
+        self.scan_once_btn.setObjectName("btn_scan_once")
+        self.scan_next_label = QLabel("다음 스캔: -")
+        self.scan_countdown_label = QLabel("남은 시간: -")
+        self.scanner_status_label = QLabel("마지막 스캔: -")
         self.scanner_health_btn = QPushButton("스캐너/매수 헬스체크")
         self.scanner_health_text = QPlainTextEdit()
         self.scanner_health_text.setReadOnly(True)
         self.scanner_health_text.setPlaceholderText("헬스체크 결과가 여기에 표시됩니다.")
         self.scanner_health_text.setMinimumHeight(160)
+        scanner_health_layout.addWidget(self.scan_once_btn)
+        scanner_health_layout.addWidget(self.scan_next_label)
+        scanner_health_layout.addWidget(self.scan_countdown_label)
+        scanner_health_layout.addWidget(self.scanner_status_label)
         scanner_health_layout.addWidget(self.scanner_health_btn)
         scanner_health_layout.addWidget(self.scanner_health_text)
         self.scanner_health_group.setLayout(scanner_health_layout)
@@ -763,6 +777,8 @@ class MainWindow(QMainWindow):
         self.test_force_buy_btn.clicked.connect(self._force_test_buy)
         self.test_force_sell_btn.clicked.connect(self._force_test_sell)
         self.scanner_health_btn.clicked.connect(self._run_scanner_healthcheck)
+        self.scan_once_btn.clicked.connect(self._on_scan_once_clicked)
+        logger.info("[SCANNER_UI] scan_once_button_connected=True")
         self.preset_save_btn.clicked.connect(self._on_save_preset)
         self.preset_load_btn.clicked.connect(self._on_load_preset)
         self.preset_delete_btn.clicked.connect(self._on_delete_preset)
@@ -1016,9 +1032,15 @@ class MainWindow(QMainWindow):
             self.engine.set_external_universe(list(self.test_universe))
         if is_scanner and self.auto_timer.isActive() and not self.scanner_timer.isActive():
             self.scanner_timer.start()
+            self._scanner_next_run_at = datetime.datetime.now() + datetime.timedelta(
+                seconds=self.scanner_timer.interval() / 1000
+            )
+            self._update_scan_schedule_ui()
             self._log("스캐너 모드 스캔 타이머 시작")
         if not is_scanner and self.scanner_timer.isActive():
             self.scanner_timer.stop()
+            self._scanner_next_run_at = None
+            self._update_scan_schedule_ui()
             self._log("스캐너 모드 스캔 타이머 중지")
         self._save_current_settings()
 
@@ -2040,6 +2062,15 @@ class MainWindow(QMainWindow):
         self._log("자동 매매 시작 (타이머 가동)")
         if self.universe_mode == "scanner" and not self.scanner_timer.isActive():
             self.scanner_timer.start()
+            self._scanner_next_run_at = datetime.datetime.now() + datetime.timedelta(
+                seconds=self.scanner_timer.interval() / 1000
+            )
+            self._update_scan_schedule_ui()
+            logger.info(
+                "[SCANNER_TIMER] started interval_sec=%s next_run=%s",
+                self.scanner_timer.interval() / 1000,
+                self._scanner_next_run_at.isoformat(),
+            )
             self._log("스캐너 모드 스캔 타이머 시작")
 
     def on_auto_stop(self) -> None:
@@ -2049,6 +2080,9 @@ class MainWindow(QMainWindow):
             self._log("자동 매매 정지")
         if self.scanner_timer.isActive():
             self.scanner_timer.stop()
+            self._scanner_next_run_at = None
+            self._update_scan_schedule_ui()
+            logger.info("[SCANNER_TIMER] stopped")
             self._log("스캐너 모드 스캔 타이머 중지")
         self.auto_trading_active = False
         self.auto_trading_armed = False
@@ -2137,12 +2171,69 @@ class MainWindow(QMainWindow):
         if self.universe_mode != "scanner":
             return
 
+        logger.info("[SCANNER] start source=timer_tick")
         start = time.perf_counter()
+        ok = False
+        try:
+            self._run_scanner_once(trigger="timer")
+            ok = True
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("[SCANNER] error during timer_tick")
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info("[SCANNER] end source=timer_tick ok=%s elapsed_ms=%.1f", ok, elapsed_ms)
+            interval_sec = self.scanner_timer.interval() / 1000
+            self._scanner_next_run_at = datetime.datetime.now() + datetime.timedelta(seconds=interval_sec)
+            self._update_scan_schedule_ui()
+
+    def _snapshot_prices(self, codes: Sequence[str]) -> dict[str, Optional[float]]:
+        snapshot: dict[str, Optional[float]] = {}
+        for code in codes:
+            try:
+                snapshot[code] = self.engine.get_current_price(code)
+            except Exception as exc:  # pragma: no cover - defensive
+                snapshot[code] = None
+                self._log(f"[SCANNER] price_snapshot_failed code={code} err={exc}")
+        return snapshot
+
+    def _get_price_for_tracker(self, code: str) -> Optional[float]:
+        try:
+            return self.engine.get_current_price(code)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log(f"[OPPORTUNITY] price_fetch_failed code={code} err={exc}")
+            return None
+
+    def _on_scan_once_clicked(self) -> None:
+        if self._scanner_busy:
+            self._log("[SCANNER_BUSY] skip: already running")
+            return
+        if self._engine_busy:
+            self._log("[ENGINE_BUSY] skip: already running (context=SCANNER_MANUAL)")
+            return
+
+        logger.info("[SCANNER] start source=manual_clicked")
+        t0 = time.perf_counter()
+        ok = False
+        try:
+            if self.universe_mode != "scanner":
+                logger.info("[SCANNER] skip: universe_mode=%s (not scanner)", self.universe_mode)
+                self._append_scanner_status_ui("스캐너 모드가 아닙니다.")
+                return
+            self._run_scanner_once(trigger="manual")
+            ok = True
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("[SCANNER] error during scan_once")
+        finally:
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            logger.info("[SCANNER] end source=manual_clicked ok=%s elapsed_ms=%.1f", ok, elapsed_ms)
+
+    def _run_scanner_once(self, trigger: str) -> None:
         self._scanner_busy = True
         try:
             candidates = list(self.condition_universe)
             if not candidates:
                 self._log("[SCANNER] empty candidates → 스캔 스킵")
+                self._append_scanner_status_ui("조건 결과가 없어 스캔을 건너뜁니다.")
                 return
             scan_result = self.scanner.scan(candidates, self.scanner_current_universe)
             self._last_scan_result = scan_result
@@ -2150,9 +2241,9 @@ class MainWindow(QMainWindow):
             self.engine.set_external_universe(scan_result.applied_universe)
 
             self._log(
-                f"[SCANNER] raw={scan_result.raw_count} filtered={scan_result.filtered_count} "
-                f"desired={len(scan_result.desired_universe)} current={len(scan_result.current_universe)} "
-                f"final={len(scan_result.applied_universe)}"
+                f"[SCANNER] trigger={trigger} raw={scan_result.raw_count} filtered={scan_result.filtered_count} "
+                f"desired={len(scan_result.desired_universe)} applied={len(scan_result.applied_universe)} "
+                f"realreg={len(self.scanner_current_universe)}"
             )
             self._log(
                 f"[SCANNER_CHURN] desired_swaps={scan_result.desired_swaps} allowed={scan_result.allowed_swaps} "
@@ -2185,27 +2276,31 @@ class MainWindow(QMainWindow):
                     f"[OPPORTUNITY_SUMMARY] window=1h missed={summary.get('missed_strong', 0):.0f} "
                     f"avg_5m={avg_5m:.2f} avg_15m={avg_15m:.2f} pos_15m={pos_15m:.1f}%"
                 )
+
+            last_ts = scan_result.ts_scan.strftime("%H:%M:%S")
+            self.scanner_status_label.setText(
+                f"마지막 스캔: {last_ts} / raw={scan_result.raw_count} "
+                f"filtered={scan_result.filtered_count} desired={len(scan_result.desired_universe)} "
+                f"applied={len(scan_result.applied_universe)}"
+            )
         finally:
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            self._log(f"[SCANNER] end elapsed_ms={elapsed_ms:.1f}")
             self._scanner_busy = False
 
-    def _snapshot_prices(self, codes: Sequence[str]) -> dict[str, Optional[float]]:
-        snapshot: dict[str, Optional[float]] = {}
-        for code in codes:
-            try:
-                snapshot[code] = self.engine.get_current_price(code)
-            except Exception as exc:  # pragma: no cover - defensive
-                snapshot[code] = None
-                self._log(f"[SCANNER] price_snapshot_failed code={code} err={exc}")
-        return snapshot
+    def _update_scan_schedule_ui(self) -> None:
+        if self.scanner_timer.isActive() and self._scanner_next_run_at:
+            now = datetime.datetime.now()
+            remain = max(0, int((self._scanner_next_run_at - now).total_seconds()))
+            self.scan_next_label.setText(
+                f"다음 스캔: {self._scanner_next_run_at.strftime('%H:%M:%S')}"
+            )
+            self.scan_countdown_label.setText(f"남은 시간: {remain}초")
+        else:
+            self.scan_next_label.setText("다음 스캔: -")
+            self.scan_countdown_label.setText("남은 시간: -")
 
-    def _get_price_for_tracker(self, code: str) -> Optional[float]:
-        try:
-            return self.engine.get_current_price(code)
-        except Exception as exc:  # pragma: no cover - defensive
-            self._log(f"[OPPORTUNITY] price_fetch_failed code={code} err={exc}")
-            return None
+    def _append_scanner_status_ui(self, message: str) -> None:
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.scanner_status_label.setText(f"마지막 스캔: {ts} / {message}")
 
     def _run_scanner_healthcheck(self) -> None:
         if self._engine_busy or self._scanner_busy:

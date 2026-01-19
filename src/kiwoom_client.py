@@ -4,6 +4,7 @@ This module keeps the function signatures that will later be wired to the
 real Kiwoom REST API. For now every call only logs what would happen.
 """
 
+import datetime
 import logging
 import sys
 from dataclasses import dataclass
@@ -175,28 +176,38 @@ class KiwoomClient:
             except Exception:
                 return None
 
-        code_raw = get_raw(9001)
-        code = code_raw.replace("A", "").strip()
-        name = get_raw(302) or None
-        order_no = get_raw(9203) or None
-        status = get_raw(913) or None
-        order_qty = parse_int(get_raw(900))
-        order_price = parse_int(get_raw(901))
-        side = get_raw(907) or None
-        exec_no = get_raw(909) or None
-        exec_price = parse_int(get_raw(910))
-        exec_qty = parse_int(get_raw(911))
-        fee = parse_int(get_raw(938))
-        tax = parse_int(get_raw(939))
+        code_raw = payload.get("code") or get_raw(9001)
+        code = str(code_raw).replace("A", "").strip()
+        name = payload.get("name") or get_raw(302) or None
+        order_no = payload.get("order_no") or get_raw(9203) or None
+        status = payload.get("status") or get_raw(913) or None
+        order_qty = parse_int(payload.get("order_qty") or get_raw(900))
+        order_price = parse_int(payload.get("order_price") or get_raw(901))
+        side = payload.get("side_raw") or get_raw(907) or None
+        exec_no = payload.get("exec_no") or get_raw(909) or None
+        exec_price = parse_int(payload.get("exec_price") or get_raw(910))
+        exec_qty = parse_int(payload.get("exec_qty") or get_raw(911))
+        fee = parse_int(payload.get("fee") or get_raw(938)) or 0
+        tax = parse_int(payload.get("tax") or get_raw(939)) or 0
+        account = payload.get("account") or get_raw(9201) or None
 
         if not code:
             return
 
+        mode = "real"
+        if self.openapi and hasattr(self.openapi, "is_simulation_server"):
+            try:
+                if self.openapi.is_simulation_server():
+                    mode = "sim"
+            except Exception:
+                mode = "real"
+
+        created_at = datetime.datetime.now().isoformat(timespec="seconds")
         event = {
-            "mode": "real",
+            "mode": mode,
             "event_type": "chejan",
             "gubun": payload.get("gubun"),
-            "account": None,
+            "account": account,
             "code": code,
             "name": name,
             "side": side,
@@ -210,7 +221,22 @@ class KiwoomClient:
             "fee": fee,
             "tax": tax,
             "raw_json": TradeHistoryStore.encode_raw(raw_fids),
+            "created_at": created_at,
         }
+        logger.info(
+            "[CHEJAN_SAVE] mode=%s account=%s gubun=%s status=%s code=%s side=%s order_no=%s exec_qty=%s exec_price=%s fee=%s tax=%s",
+            mode,
+            account,
+            payload.get("gubun"),
+            status,
+            code,
+            side,
+            order_no,
+            exec_qty,
+            exec_price,
+            fee,
+            tax,
+        )
         self.history_store.insert_event(event)
 
     def _fetch_balance_from_kiwoom_api(self) -> int:

@@ -65,6 +65,7 @@ from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
 from .logging_setup import configure_logging
+from .gui_reports import ReportsWidget
 
 logger = logging.getLogger(__name__)
 
@@ -731,6 +732,9 @@ class MainWindow(QMainWindow):
         tab_log_layout.addWidget(self.log_view)
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
+
+        report_widget = ReportsWidget(self.history_store, parent=self)
+        self.main_tabs.addTab(wrap_tab(report_widget), "리포트")
 
         main.addWidget(self.main_tabs)
         root.setLayout(main)
@@ -2425,6 +2429,7 @@ class MainWindow(QMainWindow):
             elapsed_ms = (time.perf_counter() - start) * 1000
             self._log(f"[HEALTHCHECK] end elapsed_ms={elapsed_ms:.1f}")
             self._scanner_busy = False
+
 
     def _market_state(self) -> tuple[bool, str, datetime.datetime]:
         now = datetime.datetime.now()

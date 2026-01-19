@@ -594,14 +594,47 @@ else:
                 if ax and hasattr(ax, "dynamicCall"):
                     raw_fids: dict[str, str] = {}
                     fid_tokens = [f for f in str(fid_list).split(";") if f]
-                    for fid in fid_tokens:
+                    required_fids = {
+                        9201,
+                        9001,
+                        302,
+                        907,
+                        913,
+                        9203,
+                        900,
+                        901,
+                        909,
+                        910,
+                        911,
+                        938,
+                        939,
+                    }
+                    fid_tokens.extend(str(fid) for fid in required_fids)
+                    for fid in sorted(set(fid_tokens)):
                         try:
                             raw_fids[str(fid)] = str(ax.dynamicCall("GetChejanData(int)", int(fid)))
                         except Exception:
                             raw_fids[str(fid)] = ""
                     payload["raw_fids"] = raw_fids
-                    for fid in (9203, 9001, 302, 10, 904, 913):
-                        payload[str(fid)] = raw_fids.get(str(fid), "")
+                    code_raw = raw_fids.get("9001", "")
+                    code = str(code_raw).replace("A", "").strip()
+                    payload.update(
+                        {
+                            "account": raw_fids.get("9201", "").strip(),
+                            "code": code,
+                            "name": raw_fids.get("302", "").strip(),
+                            "side_raw": raw_fids.get("907", "").strip(),
+                            "status": raw_fids.get("913", "").strip(),
+                            "order_no": raw_fids.get("9203", "").strip(),
+                            "order_qty": raw_fids.get("900", "").strip(),
+                            "order_price": raw_fids.get("901", "").strip(),
+                            "exec_no": raw_fids.get("909", "").strip(),
+                            "exec_price": raw_fids.get("910", "").strip(),
+                            "exec_qty": raw_fids.get("911", "").strip(),
+                            "fee": raw_fids.get("938", "").strip(),
+                            "tax": raw_fids.get("939", "").strip(),
+                        }
+                    )
                 print(f"[OpenAPI] OnReceiveChejanData payload={payload}")
             except Exception as exc:  # pragma: no cover - runtime dependent
                 print(f"[OpenAPI] Chejan 처리 실패: {exc}")

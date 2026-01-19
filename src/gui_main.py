@@ -16,7 +16,6 @@ try:
         QButtonGroup,
         QCheckBox,
         QComboBox,
-        QDateEdit,
         QDialog,
         QDialogButtonBox,
         QDoubleSpinBox,
@@ -66,7 +65,6 @@ from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
 from .logging_setup import configure_logging
-from .performance_analyzer import build_closed_lots, load_fills, summarize_by_symbol, summarize_daily
 
 logger = logging.getLogger(__name__)
 
@@ -296,9 +294,6 @@ class MainWindow(QMainWindow):
         self.opportunity_tracker = MissedOpportunityTracker(Path("logs"))
         self._last_scan_result = None
         self._scanner_next_run_at: Optional[datetime.datetime] = None
-        self._report_symbol_perf = []
-        self._report_daily_perf = None
-        self._report_closed_lots = []
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -737,95 +732,6 @@ class MainWindow(QMainWindow):
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
 
-        report_tab = QWidget()
-        report_layout = QVBoxLayout()
-        report_controls = QHBoxLayout()
-        self.report_start_date = QDateEdit()
-        self.report_end_date = QDateEdit()
-        self.report_start_date.setCalendarPopup(True)
-        self.report_end_date.setCalendarPopup(True)
-        today = datetime.date.today()
-        self.report_start_date.setDate(today)
-        self.report_end_date.setDate(today)
-        self.report_today_btn = QPushButton("당일")
-        self.report_mode_combo = QComboBox()
-        self.report_mode_combo.addItem("전체", "all")
-        self.report_mode_combo.addItem("모의", "paper")
-        self.report_mode_combo.addItem("실거래", "real")
-        self.report_mode_combo.addItem("모의서버", "sim")
-        self.report_run_btn = QPushButton("리포트 생성")
-        self.report_export_symbol_btn = QPushButton("종목별 성과 CSV")
-        self.report_export_daily_btn = QPushButton("당일 보고서 CSV")
-        report_controls.addWidget(QLabel("시작"))
-        report_controls.addWidget(self.report_start_date)
-        report_controls.addWidget(QLabel("종료"))
-        report_controls.addWidget(self.report_end_date)
-        report_controls.addWidget(self.report_today_btn)
-        report_controls.addWidget(QLabel("모드"))
-        report_controls.addWidget(self.report_mode_combo)
-        report_controls.addWidget(self.report_run_btn)
-        report_controls.addWidget(self.report_export_symbol_btn)
-        report_controls.addWidget(self.report_export_daily_btn)
-        report_layout.addLayout(report_controls)
-
-        self.report_status_label = QLabel("리포트 대기 중")
-        report_layout.addWidget(self.report_status_label)
-
-        self.report_tabs = QTabWidget()
-
-        symbol_tab = QWidget()
-        symbol_layout = QVBoxLayout()
-        self.report_symbol_table = QTableWidget(0, 18)
-        self.report_symbol_table.setHorizontalHeaderLabels(
-            [
-                "코드",
-                "종목명",
-                "거래수",
-                "승",
-                "패",
-                "승률(%)",
-                "총매수",
-                "총매도",
-                "실현손익(세전)",
-                "수수료",
-                "세금",
-                "실현손익(세후)",
-                "수익률(%)",
-                "평균손익",
-                "평균수익",
-                "평균손실",
-                "프로핏팩터",
-                "평균보유(분)",
-            ]
-        )
-        self.report_symbol_table.setSortingEnabled(True)
-        symbol_layout.addWidget(self.report_symbol_table)
-        symbol_tab.setLayout(symbol_layout)
-        self.report_tabs.addTab(symbol_tab, "종목별 성과")
-
-        daily_tab = QWidget()
-        daily_layout = QVBoxLayout()
-        self.report_summary_label = QLabel("요약: -")
-        daily_layout.addWidget(self.report_summary_label)
-        self.report_top_table = QTableWidget(0, 4)
-        self.report_top_table.setHorizontalHeaderLabels(["코드", "종목명", "거래수", "순손익"])
-        self.report_bottom_table = QTableWidget(0, 4)
-        self.report_bottom_table.setHorizontalHeaderLabels(["코드", "종목명", "거래수", "순손익"])
-        self.report_bucket_table = QTableWidget(0, 4)
-        self.report_bucket_table.setHorizontalHeaderLabels(["버킷", "거래수", "승률(%)", "순손익"])
-        daily_layout.addWidget(QLabel("Top 10 종목"))
-        daily_layout.addWidget(self.report_top_table)
-        daily_layout.addWidget(QLabel("Bottom 10 종목"))
-        daily_layout.addWidget(self.report_bottom_table)
-        daily_layout.addWidget(QLabel("시간대별 성과(30분)"))
-        daily_layout.addWidget(self.report_bucket_table)
-        daily_tab.setLayout(daily_layout)
-        self.report_tabs.addTab(daily_tab, "당일 보고서")
-
-        report_layout.addWidget(self.report_tabs)
-        report_tab.setLayout(report_layout)
-        self.main_tabs.addTab(wrap_tab(report_tab), "리포트")
-
         main.addWidget(self.main_tabs)
         root.setLayout(main)
         self.setCentralWidget(root)
@@ -873,10 +779,6 @@ class MainWindow(QMainWindow):
         self.scanner_health_btn.clicked.connect(self._run_scanner_healthcheck)
         self.scan_once_btn.clicked.connect(self._on_scan_once_clicked)
         logger.info("[SCANNER_UI] scan_once_button_connected=True")
-        self.report_today_btn.clicked.connect(self._set_report_today)
-        self.report_run_btn.clicked.connect(self._run_reports)
-        self.report_export_symbol_btn.clicked.connect(self._export_symbol_report_csv)
-        self.report_export_daily_btn.clicked.connect(self._export_daily_report_csv)
         self.preset_save_btn.clicked.connect(self._on_save_preset)
         self.preset_load_btn.clicked.connect(self._on_load_preset)
         self.preset_delete_btn.clicked.connect(self._on_delete_preset)
@@ -2523,207 +2425,6 @@ class MainWindow(QMainWindow):
             elapsed_ms = (time.perf_counter() - start) * 1000
             self._log(f"[HEALTHCHECK] end elapsed_ms={elapsed_ms:.1f}")
             self._scanner_busy = False
-
-    def _set_report_today(self) -> None:
-        today = datetime.date.today()
-        self.report_start_date.setDate(today)
-        self.report_end_date.setDate(today)
-
-    def _run_reports(self) -> None:
-        self.report_status_label.setText("리포트 생성 중...")
-
-        def work() -> None:
-            start_dt = datetime.datetime.combine(
-                self.report_start_date.date().toPyDate(), datetime.time(0, 0)
-            )
-            end_dt = datetime.datetime.combine(
-                self.report_end_date.date().toPyDate(), datetime.time(23, 59, 59)
-            )
-            mode = self.report_mode_combo.currentData()
-            fills = load_fills(self.history_store, start_dt, end_dt, mode_filter=mode)
-            closed = build_closed_lots(fills)
-            by_symbol = summarize_by_symbol(closed)
-            daily = summarize_daily(closed)
-            self._report_symbol_perf = by_symbol
-            self._report_daily_perf = daily
-            self._report_closed_lots = closed
-            self._update_report_tables(by_symbol, daily)
-            self._log(
-                f"[REPORT] fills={len(fills)} closed={len(closed)} symbols={len(by_symbol)} net={daily.net_pnl_sum if daily else 0}"
-            )
-
-        QTimer.singleShot(0, work)
-
-    def _update_report_tables(self, by_symbol, daily) -> None:
-        if not by_symbol:
-            self.report_status_label.setText("체결 데이터가 없습니다(당일 주문이 없거나 체결 이벤트가 저장되지 않았습니다).")
-        else:
-            self.report_status_label.setText(
-                f"종목 {len(by_symbol)}개 / 청산 {daily.total_closed_trades if daily else 0}건"
-            )
-
-        self.report_symbol_table.setRowCount(len(by_symbol))
-        for row_idx, perf in enumerate(by_symbol):
-            self.report_symbol_table.setItem(row_idx, 0, QTableWidgetItem(perf.code))
-            self.report_symbol_table.setItem(row_idx, 1, QTableWidgetItem(str(perf.name or "")))
-            self.report_symbol_table.setItem(row_idx, 2, QTableWidgetItem(str(perf.closed_trades)))
-            self.report_symbol_table.setItem(row_idx, 3, QTableWidgetItem(str(perf.wins)))
-            self.report_symbol_table.setItem(row_idx, 4, QTableWidgetItem(str(perf.losses)))
-            self.report_symbol_table.setItem(row_idx, 5, QTableWidgetItem(f"{perf.win_rate:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 6, QTableWidgetItem(str(perf.buy_amount)))
-            self.report_symbol_table.setItem(row_idx, 7, QTableWidgetItem(str(perf.sell_amount)))
-            self.report_symbol_table.setItem(row_idx, 8, QTableWidgetItem(str(perf.gross_profit_sum + perf.gross_loss_sum)))
-            self.report_symbol_table.setItem(row_idx, 9, QTableWidgetItem(str(perf.fee_sum)))
-            self.report_symbol_table.setItem(row_idx, 10, QTableWidgetItem(str(perf.tax_sum)))
-            self.report_symbol_table.setItem(row_idx, 11, QTableWidgetItem(str(perf.net_pnl_sum)))
-            self.report_symbol_table.setItem(row_idx, 12, QTableWidgetItem(f"{perf.return_pct:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 13, QTableWidgetItem(f"{perf.avg_pnl:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 14, QTableWidgetItem(f"{perf.avg_win:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 15, QTableWidgetItem(f"{perf.avg_loss:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 16, QTableWidgetItem(f"{perf.profit_factor:.2f}"))
-            self.report_symbol_table.setItem(row_idx, 17, QTableWidgetItem(f"{perf.avg_hold_minutes:.1f}"))
-        self.report_symbol_table.resizeColumnsToContents()
-
-        if daily:
-            best = daily.best_trade
-            worst = daily.worst_trade
-            self.report_summary_label.setText(
-                " | ".join(
-                    [
-                        f"총청산 {daily.total_closed_trades}건",
-                        f"승/패 {daily.wins}/{daily.losses} ({daily.win_rate:.1f}%)",
-                        f"실현손익(세전) {daily.gross_pnl_sum}",
-                        f"수수료 {daily.fee_sum}",
-                        f"세금 {daily.tax_sum}",
-                        f"실현손익(세후) {daily.net_pnl_sum}",
-                        f"평균손익 {daily.avg_pnl:.2f}",
-                        f"최대이익 {best.code if best else '-'} {best.net_pnl if best else 0}",
-                        f"최대손실 {worst.code if worst else '-'} {worst.net_pnl if worst else 0}",
-                    ]
-                )
-            )
-        else:
-            self.report_summary_label.setText("요약: -")
-
-        symbol_map = {perf.code: perf for perf in by_symbol}
-        top_sorted = sorted(by_symbol, key=lambda x: x.net_pnl_sum, reverse=True)[:10]
-        bottom_sorted = sorted(by_symbol, key=lambda x: x.net_pnl_sum)[:10]
-        self.report_top_table.setRowCount(len(top_sorted))
-        for idx, perf in enumerate(top_sorted):
-            self.report_top_table.setItem(idx, 0, QTableWidgetItem(perf.code))
-            self.report_top_table.setItem(idx, 1, QTableWidgetItem(str(perf.name or "")))
-            self.report_top_table.setItem(idx, 2, QTableWidgetItem(str(perf.closed_trades)))
-            self.report_top_table.setItem(idx, 3, QTableWidgetItem(str(perf.net_pnl_sum)))
-        self.report_top_table.resizeColumnsToContents()
-
-        self.report_bottom_table.setRowCount(len(bottom_sorted))
-        for idx, perf in enumerate(bottom_sorted):
-            self.report_bottom_table.setItem(idx, 0, QTableWidgetItem(perf.code))
-            self.report_bottom_table.setItem(idx, 1, QTableWidgetItem(str(perf.name or "")))
-            self.report_bottom_table.setItem(idx, 2, QTableWidgetItem(str(perf.closed_trades)))
-            self.report_bottom_table.setItem(idx, 3, QTableWidgetItem(str(perf.net_pnl_sum)))
-        self.report_bottom_table.resizeColumnsToContents()
-
-        bucket_perf = daily.time_bucket_perf if daily else []
-        self.report_bucket_table.setRowCount(len(bucket_perf))
-        for idx, bucket in enumerate(bucket_perf):
-            self.report_bucket_table.setItem(idx, 0, QTableWidgetItem(str(bucket.get("bucket"))))
-            self.report_bucket_table.setItem(idx, 1, QTableWidgetItem(str(bucket.get("trades"))))
-            self.report_bucket_table.setItem(idx, 2, QTableWidgetItem(f"{bucket.get('win_rate', 0):.1f}"))
-            self.report_bucket_table.setItem(idx, 3, QTableWidgetItem(str(bucket.get("net_pnl"))))
-        self.report_bucket_table.resizeColumnsToContents()
-
-    def _export_symbol_report_csv(self) -> None:
-        if not self._report_symbol_perf:
-            self.report_status_label.setText("내보낼 종목별 성과 데이터가 없습니다.")
-            return
-        path_str, _ = QFileDialog.getSaveFileName(self, "종목별 성과 CSV 저장", "", "CSV Files (*.csv)")
-        if not path_str:
-            return
-        rows = []
-        for perf in self._report_symbol_perf:
-            rows.append(
-                {
-                    "code": perf.code,
-                    "name": perf.name or "",
-                    "closed_trades": perf.closed_trades,
-                    "wins": perf.wins,
-                    "losses": perf.losses,
-                    "win_rate": round(perf.win_rate, 2),
-                    "buy_amount": perf.buy_amount,
-                    "sell_amount": perf.sell_amount,
-                    "gross_pnl": perf.gross_profit_sum + perf.gross_loss_sum,
-                    "fee_sum": perf.fee_sum,
-                    "tax_sum": perf.tax_sum,
-                    "net_pnl": perf.net_pnl_sum,
-                    "return_pct": round(perf.return_pct, 2),
-                    "avg_pnl": round(perf.avg_pnl, 2),
-                    "avg_win": round(perf.avg_win, 2),
-                    "avg_loss": round(perf.avg_loss, 2),
-                    "profit_factor": round(perf.profit_factor, 2),
-                    "avg_hold_minutes": round(perf.avg_hold_minutes, 2),
-                }
-            )
-        self._write_csv(Path(path_str), rows)
-
-    def _export_daily_report_csv(self) -> None:
-        if not self._report_daily_perf:
-            self.report_status_label.setText("내보낼 보고서 데이터가 없습니다.")
-            return
-        path_str, _ = QFileDialog.getSaveFileName(self, "당일 보고서 CSV 저장", "", "CSV Files (*.csv)")
-        if not path_str:
-            return
-        base = Path(path_str)
-        summary_path = base
-        details_path = base.with_name(base.stem + "_details" + base.suffix)
-        daily = self._report_daily_perf
-        summary_row = {
-            "date": daily.date,
-            "total_closed_trades": daily.total_closed_trades,
-            "wins": daily.wins,
-            "losses": daily.losses,
-            "win_rate": round(daily.win_rate, 2),
-            "gross_pnl_sum": daily.gross_pnl_sum,
-            "fee_sum": daily.fee_sum,
-            "tax_sum": daily.tax_sum,
-            "net_pnl_sum": daily.net_pnl_sum,
-            "avg_pnl": round(daily.avg_pnl, 2),
-            "best_symbol": daily.best_symbol,
-            "worst_symbol": daily.worst_symbol,
-        }
-        self._write_csv(summary_path, [summary_row])
-        detail_rows = []
-        for lot in self._report_closed_lots:
-            detail_rows.append(
-                {
-                    "code": lot.code,
-                    "name": lot.name or "",
-                    "entry_ts": lot.entry_ts.isoformat(sep=" ", timespec="seconds"),
-                    "exit_ts": lot.exit_ts.isoformat(sep=" ", timespec="seconds"),
-                    "qty": lot.qty,
-                    "entry_price": lot.entry_price,
-                    "exit_price": lot.exit_price,
-                    "gross_pnl": lot.gross_pnl,
-                    "fee": lot.fee,
-                    "tax": lot.tax,
-                    "net_pnl": lot.net_pnl,
-                    "hold_minutes": round(lot.hold_seconds / 60, 2),
-                }
-            )
-        self._write_csv(details_path, detail_rows)
-
-    @staticmethod
-    def _write_csv(path: Path, rows: list[dict]) -> None:
-        import csv
-
-        if not rows:
-            path.write_text("", encoding="utf-8")
-            return
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
 
     def _market_state(self) -> tuple[bool, str, datetime.datetime]:
         now = datetime.datetime.now()

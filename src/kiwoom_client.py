@@ -188,24 +188,15 @@ class KiwoomClient:
         exec_qty = parse_int(get_raw(911))
         fee = parse_int(get_raw(938))
         tax = parse_int(get_raw(939))
-        account = get_raw(9201) or None
 
         if not code:
             return
 
-        mode = "real"
-        if self.openapi and hasattr(self.openapi, "is_simulation_server"):
-            try:
-                if self.openapi.is_simulation_server():
-                    mode = "sim"
-            except Exception:
-                mode = "real"
-
         event = {
-            "mode": mode,
+            "mode": "real",
             "event_type": "chejan",
             "gubun": payload.get("gubun"),
-            "account": account,
+            "account": None,
             "code": code,
             "name": name,
             "side": side,

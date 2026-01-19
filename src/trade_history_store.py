@@ -73,10 +73,6 @@ class TradeHistoryStore:
                 )
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_trade_events_created_at ON trade_events(created_at)"
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_mode ON trade_events(mode)")
 
     def insert_event(self, event: dict[str, Any]) -> None:
         created_at = event.get("created_at") or datetime.now().isoformat(sep=" ", timespec="seconds")

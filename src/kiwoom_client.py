@@ -260,6 +260,28 @@ class KiwoomClient:
 
         return {"cash": float(self.get_real_balance())}
 
+    def get_rank_candidates_trade_value(self, market_code: str, top_n: int) -> tuple[list[str], dict]:
+        if not self.openapi or not hasattr(self.openapi, "request_opt10030_rank"):
+            return [], {"ok": False, "reason": "openapi_unavailable"}
+        try:
+            rows = self.openapi.request_opt10030_rank(market_code, sort="1", timeout_sec=5.0, top_n=top_n)
+            codes = [str(row.get("code", "")).replace("A", "").strip() for row in rows if row.get("code")]
+            trace = self.openapi.get_last_tr_trace() if hasattr(self.openapi, "get_last_tr_trace") else {}
+            return codes, trace
+        except Exception as exc:  # pragma: no cover - defensive
+            return [], {"ok": False, "reason": f"error:{exc}"}
+
+    def get_rank_candidates_change_rate(self, market_code: str, top_n: int) -> tuple[list[str], dict]:
+        if not self.openapi or not hasattr(self.openapi, "request_opt10027_rank"):
+            return [], {"ok": False, "reason": "openapi_unavailable"}
+        try:
+            rows = self.openapi.request_opt10027_rank(market_code, sort="1", timeout_sec=5.0, top_n=top_n)
+            codes = [str(row.get("code", "")).replace("A", "").strip() for row in rows if row.get("code")]
+            trace = self.openapi.get_last_tr_trace() if hasattr(self.openapi, "get_last_tr_trace") else {}
+            return codes, trace
+        except Exception as exc:  # pragma: no cover - defensive
+            return [], {"ok": False, "reason": f"error:{exc}"}
+
     def _can_send_real_order(self) -> bool:
         self._last_block_reason = ""
         if not self.openapi:

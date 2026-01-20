@@ -9,6 +9,7 @@ non-Windows platforms), a disabled stub keeps imports/tests from crashing.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import sys
@@ -202,6 +203,9 @@ else:
             self._balance_req_pending: set[str] = set()
             self._balance_req_timer: Optional[QtCore.QTimer] = None
             self._balance_req_timeout_ms: int = 12000
+            self._rank_resp: dict[str, list[dict]] = {}
+            self._rank_loop: Optional[QtCore.QEventLoop] = None
+            self._last_tr_trace: dict[str, object] = {}
             self._wire_control()
 
         # -- Setup ------------------------------------------------------
@@ -909,10 +913,187 @@ else:
                 elif rqname == "opw00018-holdings":
                     self._parse_holdings(trcode, rqname)
                     self._mark_balance_pending_done(rqname)
+                elif rqname in {"opt10030-rank", "opt10027-rank"}:
+                    rows = self._parse_rank_rows(trcode, rqname)
+                    self._rank_resp[rqname] = rows
+                    if self._last_tr_trace:
+                        self._last_tr_trace.update(
+                            {
+                                "responded_at": datetime.datetime.now().isoformat(),
+                                "ok": True,
+                                "rows": len(rows),
+                                "error": "",
+                            }
+                        )
+                    if self._rank_loop and self._rank_loop.isRunning():
+                        self._rank_loop.quit()
             except Exception as exc:  # pragma: no cover
                 print(f"[OpenAPI] OnReceiveTrData 처리 실패: {exc}")
                 traceback.print_exc()
                 self._clear_balance_inflight()
+
+        def _parse_rank_rows(self, trcode: str, rqname: str) -> list[dict]:
+            ax = self.ax
+            if not (ax and hasattr(ax, "dynamicCall")):
+                return []
+            try:
+                repeat_cnt = int(ax.dynamicCall("GetRepeatCnt(QString, QString)", trcode, rqname))
+            except Exception as exc:  # pragma: no cover
+                print(f"[OpenAPI] rank repeat count failed: {exc}")
+                repeat_cnt = 0
+            rows: list[dict] = []
+            for i in range(repeat_cnt):
+                def get(field: str) -> str:
+                    return str(
+                        ax.dynamicCall("GetCommData(QString, QString, int, QString)", trcode, rqname, i, field)
+                    ).strip()
+
+                if rqname == "opt10030-rank":
+                    rows.append(
+                        {
+                            "code": get("종목코드"),
+                            "name": get("종목명"),
+                            "price": get("현재가"),
+                            "change_rate": get("등락율"),
+                            "volume": get("거래량"),
+                            "trade_value": get("거래대금"),
+                        }
+                    )
+                else:
+                    rows.append(
+                        {
+                            "code": get("종목코드"),
+                            "name": get("종목명"),
+                            "price": get("현재가"),
+                            "change_rate": get("등락율"),
+                            "volume": get("현재거래량"),
+                            "strength": get("체결강도"),
+                        }
+                    )
+            return rows
+
+        def get_last_tr_trace(self) -> dict[str, object]:
+            return dict(self._last_tr_trace or {})
+
+        def request_opt10030_rank(
+            self, market_code: str, sort: str, timeout_sec: float = 5.0, top_n: int = 200
+        ) -> list[dict]:
+            if not self.is_enabled():
+                return []
+            ax = self.ax
+            if not (ax and hasattr(ax, "dynamicCall")):
+                return []
+            rqname = "opt10030-rank"
+            self._rank_resp[rqname] = []
+            self._last_tr_trace = {
+                "rqname": rqname,
+                "trcode": "opt10030",
+                "requested_at": datetime.datetime.now().isoformat(),
+                "responded_at": None,
+                "ok": False,
+                "rows": 0,
+                "error": "",
+            }
+            try:
+                ax.dynamicCall("SetInputValue(QString, QString)", "시장구분", market_code)
+                ax.dynamicCall("SetInputValue(QString, QString)", "정렬구분", sort)
+                ax.dynamicCall("SetInputValue(QString, QString)", "관리종목포함", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "신용구분", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "거래량조건", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "가격조건", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "거래대금조건", "0")
+                ax.dynamicCall(
+                    "CommRqData(QString, QString, int, QString)",
+                    rqname,
+                    "opt10030",
+                    0,
+                    self.screen_no,
+                )
+            except Exception as exc:
+                self._last_tr_trace["error"] = f"request_failed: {exc}"
+                return []
+            loop = QtCore.QEventLoop()
+            self._rank_loop = loop
+            timer = QtCore.QTimer()
+            timer.setSingleShot(True)
+
+            def _timeout() -> None:
+                self._last_tr_trace.update(
+                    {
+                        "responded_at": datetime.datetime.now().isoformat(),
+                        "ok": False,
+                        "error": f"timeout:{timeout_sec}",
+                    }
+                )
+                loop.quit()
+
+            timer.timeout.connect(_timeout)
+            timer.start(int(timeout_sec * 1000))
+            loop.exec_()
+            timer.stop()
+            rows = self._rank_resp.get(rqname, [])[:top_n]
+            if self._last_tr_trace.get("rows") == 0 and rows:
+                self._last_tr_trace["rows"] = len(rows)
+            return rows
+
+        def request_opt10027_rank(
+            self, market_code: str, sort: str, timeout_sec: float = 5.0, top_n: int = 200
+        ) -> list[dict]:
+            if not self.is_enabled():
+                return []
+            ax = self.ax
+            if not (ax and hasattr(ax, "dynamicCall")):
+                return []
+            rqname = "opt10027-rank"
+            self._rank_resp[rqname] = []
+            self._last_tr_trace = {
+                "rqname": rqname,
+                "trcode": "opt10027",
+                "requested_at": datetime.datetime.now().isoformat(),
+                "responded_at": None,
+                "ok": False,
+                "rows": 0,
+                "error": "",
+            }
+            try:
+                ax.dynamicCall("SetInputValue(QString, QString)", "시장구분", market_code)
+                ax.dynamicCall("SetInputValue(QString, QString)", "정렬구분", sort)
+                ax.dynamicCall("SetInputValue(QString, QString)", "관리종목포함", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "신용구분", "0")
+                ax.dynamicCall("SetInputValue(QString, QString)", "거래량조건", "0")
+                ax.dynamicCall(
+                    "CommRqData(QString, QString, int, QString)",
+                    rqname,
+                    "opt10027",
+                    0,
+                    self.screen_no,
+                )
+            except Exception as exc:
+                self._last_tr_trace["error"] = f"request_failed: {exc}"
+                return []
+            loop = QtCore.QEventLoop()
+            self._rank_loop = loop
+            timer = QtCore.QTimer()
+            timer.setSingleShot(True)
+
+            def _timeout() -> None:
+                self._last_tr_trace.update(
+                    {
+                        "responded_at": datetime.datetime.now().isoformat(),
+                        "ok": False,
+                        "error": f"timeout:{timeout_sec}",
+                    }
+                )
+                loop.quit()
+
+            timer.timeout.connect(_timeout)
+            timer.start(int(timeout_sec * 1000))
+            loop.exec_()
+            timer.stop()
+            rows = self._rank_resp.get(rqname, [])[:top_n]
+            if self._last_tr_trace.get("rows") == 0 and rows:
+                self._last_tr_trace["rows"] = len(rows)
+            return rows
 
         def _parse_balance(self, trcode: str, rqname: str) -> None:
             """Parse opw00001 예수금상세현황요청 response."""

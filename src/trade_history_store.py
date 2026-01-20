@@ -140,6 +140,7 @@ class TradeHistoryStore:
         limit: int = 500,
         order_by: str = "created_at DESC",
     ) -> list[dict[str, Any]]:
+        order_by = self._sanitize_order_by(order_by)
         filters = ["created_at >= ?", "created_at <= ?"]
         params: list[Any] = [start_date, end_date]
         if mode and mode != "all":
@@ -173,3 +174,46 @@ class TradeHistoryStore:
     @staticmethod
     def encode_raw(raw: dict[str, Any]) -> str:
         return json.dumps(raw, ensure_ascii=False)
+
+    @staticmethod
+    def _sanitize_order_by(order_by: str) -> str:
+        allowed_columns = {
+            "created_at",
+            "mode",
+            "event_type",
+            "gubun",
+            "account",
+            "code",
+            "name",
+            "side",
+            "order_no",
+            "status",
+            "order_qty",
+            "order_price",
+            "exec_no",
+            "exec_price",
+            "exec_qty",
+            "fee",
+            "tax",
+            "raw_json",
+            "id",
+        }
+        if not order_by:
+            return "created_at DESC"
+
+        parts = order_by.split()
+        if len(parts) == 1:
+            column = parts[0]
+            direction = "DESC"
+        elif len(parts) == 2:
+            column, direction = parts
+            direction = direction.upper()
+            if direction not in {"ASC", "DESC"}:
+                return "created_at DESC"
+        else:
+            return "created_at DESC"
+
+        if column not in allowed_columns:
+            return "created_at DESC"
+
+        return f"{column} {direction}"

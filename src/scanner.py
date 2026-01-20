@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 class ScannerConfig:
     max_watch: int = 100
     max_replacements_per_scan: int = 20
+    candidate_source: str = "opt10030_trade_value"
+    market_code: str = "000"
+    top_n: int = 200
     override_margin: float = 0.2
     override_max_extra: int = 10
     incumbent_bonus: float = 0.1

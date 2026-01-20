@@ -295,6 +295,11 @@ class MainWindow(QMainWindow):
         self.opportunity_tracker = MissedOpportunityTracker(Path("logs"))
         self._last_scan_result = None
         self._scanner_next_run_at: Optional[datetime.datetime] = None
+        self.last_scanner_attempt_ts: Optional[datetime.datetime] = None
+        self.last_scanner_ok_ts: Optional[datetime.datetime] = None
+        self.last_scanner_trigger: str = ""
+        self.last_scanner_source: str = ""
+        self.last_scanner_tr_meta: dict = {}
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -489,6 +494,26 @@ class MainWindow(QMainWindow):
 
         self.scanner_health_group = QGroupBox("스캐너/매수 헬스체크")
         scanner_health_layout = QVBoxLayout()
+        source_row = QHBoxLayout()
+        self.scanner_source_combo = QComboBox()
+        self.scanner_source_combo.addItem("조건 결과", "condition")
+        self.scanner_source_combo.addItem("거래대금 상위(OPT10030)", "opt10030_trade_value")
+        self.scanner_source_combo.addItem("등락률 상위(OPT10027)", "opt10027_change_rate")
+        self.scanner_market_combo = QComboBox()
+        self.scanner_market_combo.addItem("전체(000)", "000")
+        self.scanner_market_combo.addItem("코스피(001)", "001")
+        self.scanner_market_combo.addItem("코스닥(101)", "101")
+        source_idx = self.scanner_source_combo.findData(self.scanner_config.candidate_source)
+        if source_idx >= 0:
+            self.scanner_source_combo.setCurrentIndex(source_idx)
+        market_idx = self.scanner_market_combo.findData(self.scanner_config.market_code)
+        if market_idx >= 0:
+            self.scanner_market_combo.setCurrentIndex(market_idx)
+        source_row.addWidget(QLabel("후보 소스"))
+        source_row.addWidget(self.scanner_source_combo)
+        source_row.addWidget(QLabel("시장"))
+        source_row.addWidget(self.scanner_market_combo)
+        scanner_health_layout.addLayout(source_row)
         self.scan_once_btn = QPushButton("지금 스캔 1회")
         self.scan_once_btn.setObjectName("btn_scan_once")
         self.scan_next_label = QLabel("다음 스캔: -")
@@ -783,6 +808,8 @@ class MainWindow(QMainWindow):
         self.scanner_health_btn.clicked.connect(self._run_scanner_healthcheck)
         self.scan_once_btn.clicked.connect(self._on_scan_once_clicked)
         logger.info("[SCANNER_UI] scan_once_button_connected=True")
+        self.scanner_source_combo.currentIndexChanged.connect(self._on_scanner_source_changed)
+        self.scanner_market_combo.currentIndexChanged.connect(self._on_scanner_market_changed)
         self.preset_save_btn.clicked.connect(self._on_save_preset)
         self.preset_load_btn.clicked.connect(self._on_load_preset)
         self.preset_delete_btn.clicked.connect(self._on_delete_preset)
@@ -2113,6 +2140,9 @@ class MainWindow(QMainWindow):
                     self.trading_orders_enabled = True
                     self.auto_trading_armed = False
                     self._log("[상태] 장 시작 감지 → 주문 활성화(trading_orders_enabled=True)")
+                    if self.universe_mode == "scanner":
+                        self._log("[SCANNER] market_open -> force_scan_once")
+                        self._run_scanner_once(trigger="market_open")
                 else:
                     if self.enforce_market_hours:
                         self.trading_orders_enabled = False
@@ -2170,22 +2200,31 @@ class MainWindow(QMainWindow):
             self._log("[SCANNER_BUSY] skip: already running")
             return
         if self._engine_busy:
-            self._log("[ENGINE_BUSY] skip: already running (context=SCANNER)")
+            self.last_scanner_attempt_ts = datetime.datetime.now()
+            next_run = self._scanner_next_run_at.strftime("%H:%M:%S") if self._scanner_next_run_at else "-"
+            self._log(f"[SCANNER] skip reason=engine_busy next={next_run}")
             return
         if self.universe_mode != "scanner":
             return
 
+        self._log("[SCANNER] start source=timer_tick")
         logger.info("[SCANNER] start source=timer_tick")
         start = time.perf_counter()
         ok = False
+        candidates_count = 0
+        applied_count = 0
         try:
-            self._run_scanner_once(trigger="timer")
+            candidates_count, applied_count = self._run_scanner_once(trigger="timer")
             ok = True
         except Exception:  # pragma: no cover - defensive
             logger.exception("[SCANNER] error during timer_tick")
         finally:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.info("[SCANNER] end source=timer_tick ok=%s elapsed_ms=%.1f", ok, elapsed_ms)
+            self._log(
+                f"[SCANNER] end source=timer_tick ok={ok} candidates={candidates_count} "
+                f"applied={applied_count} elapsed_ms={elapsed_ms:.1f}"
+            )
             interval_sec = self.scanner_timer.interval() / 1000
             self._scanner_next_run_at = datetime.datetime.now() + datetime.timedelta(seconds=interval_sec)
             self._update_scan_schedule_ui()
@@ -2215,34 +2254,46 @@ class MainWindow(QMainWindow):
             self._log("[ENGINE_BUSY] skip: already running (context=SCANNER_MANUAL)")
             return
 
+        self._log("[SCANNER] start source=scan_button")
         logger.info("[SCANNER] start source=manual_clicked")
         t0 = time.perf_counter()
         ok = False
+        candidates_count = 0
+        applied_count = 0
         try:
             if self.universe_mode != "scanner":
                 logger.info("[SCANNER] skip: universe_mode=%s (not scanner)", self.universe_mode)
                 self._append_scanner_status_ui("스캐너 모드가 아닙니다.")
                 return
-            self._run_scanner_once(trigger="manual")
+            candidates_count, applied_count = self._run_scanner_once(trigger="manual")
             ok = True
         except Exception:  # pragma: no cover - defensive
             logger.exception("[SCANNER] error during scan_once")
         finally:
             elapsed_ms = (time.perf_counter() - t0) * 1000
             logger.info("[SCANNER] end source=manual_clicked ok=%s elapsed_ms=%.1f", ok, elapsed_ms)
+            self._log(
+                f"[SCANNER] end source=scan_button ok={ok} candidates={candidates_count} "
+                f"applied={applied_count} elapsed_ms={elapsed_ms:.1f}"
+            )
 
-    def _run_scanner_once(self, trigger: str) -> None:
+    def _run_scanner_once(self, trigger: str) -> tuple[int, int]:
         self._scanner_busy = True
         try:
-            candidates = list(self.condition_universe)
+            self.last_scanner_attempt_ts = datetime.datetime.now()
+            self.last_scanner_trigger = trigger
+            self.last_scanner_source = self.scanner_config.candidate_source
+            candidates, tr_meta = self._build_scanner_candidates()
+            self.last_scanner_tr_meta = tr_meta or {}
             if not candidates:
                 self._log("[SCANNER] empty candidates → 스캔 스킵")
                 self._append_scanner_status_ui("조건 결과가 없어 스캔을 건너뜁니다.")
-                return
+                return 0, 0
             scan_result = self.scanner.scan(candidates, self.scanner_current_universe)
             self._last_scan_result = scan_result
             self.scanner_current_universe = scan_result.applied_universe
             self.engine.set_external_universe(scan_result.applied_universe)
+            self.last_scanner_ok_ts = datetime.datetime.now()
 
             self._log(
                 f"[SCANNER] trigger={trigger} raw={scan_result.raw_count} filtered={scan_result.filtered_count} "
@@ -2287,6 +2338,7 @@ class MainWindow(QMainWindow):
                 f"filtered={scan_result.filtered_count} desired={len(scan_result.desired_universe)} "
                 f"applied={len(scan_result.applied_universe)}"
             )
+            return scan_result.raw_count, len(scan_result.applied_universe)
         finally:
             self._scanner_busy = False
 
@@ -2305,6 +2357,56 @@ class MainWindow(QMainWindow):
     def _append_scanner_status_ui(self, message: str) -> None:
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.scanner_status_label.setText(f"마지막 스캔: {ts} / {message}")
+
+    def _build_scanner_candidates(self) -> tuple[list[str], dict]:
+        source = self.scanner_config.candidate_source
+        market_code = self.scanner_config.market_code
+        top_n = self.scanner_config.top_n
+        if source == "condition":
+            return list(self.condition_universe), {}
+        if source == "opt10030_trade_value":
+            codes, meta = self.kiwoom_client.get_rank_candidates_trade_value(market_code, top_n)
+            self._log(
+                f"[SCANNER_TR] req=opt10030 ok={meta.get('ok', False)} rows={meta.get('rows', 0)} error={meta.get('error', '')}"
+            )
+            return codes, meta
+        if source == "opt10027_change_rate":
+            codes, meta = self.kiwoom_client.get_rank_candidates_change_rate(market_code, top_n)
+            self._log(
+                f"[SCANNER_TR] req=opt10027 ok={meta.get('ok', False)} rows={meta.get('rows', 0)} error={meta.get('error', '')}"
+            )
+            return codes, meta
+        return list(self.condition_universe), {}
+
+    def _on_scanner_source_changed(self) -> None:
+        self.scanner_config = ScannerConfig(
+            max_watch=self.scanner_config.max_watch,
+            max_replacements_per_scan=self.scanner_config.max_replacements_per_scan,
+            candidate_source=self.scanner_source_combo.currentData() or "condition",
+            market_code=self.scanner_config.market_code,
+            top_n=self.scanner_config.top_n,
+            override_margin=self.scanner_config.override_margin,
+            override_max_extra=self.scanner_config.override_max_extra,
+            incumbent_bonus=self.scanner_config.incumbent_bonus,
+            strong_rank_cutoff=self.scanner_config.strong_rank_cutoff,
+            strong_topk=self.scanner_config.strong_topk,
+        )
+        self.scanner.config = self.scanner_config
+
+    def _on_scanner_market_changed(self) -> None:
+        self.scanner_config = ScannerConfig(
+            max_watch=self.scanner_config.max_watch,
+            max_replacements_per_scan=self.scanner_config.max_replacements_per_scan,
+            candidate_source=self.scanner_config.candidate_source,
+            market_code=self.scanner_market_combo.currentData() or "000",
+            top_n=self.scanner_config.top_n,
+            override_margin=self.scanner_config.override_margin,
+            override_max_extra=self.scanner_config.override_max_extra,
+            incumbent_bonus=self.scanner_config.incumbent_bonus,
+            strong_rank_cutoff=self.scanner_config.strong_rank_cutoff,
+            strong_topk=self.scanner_config.strong_topk,
+        )
+        self.scanner.config = self.scanner_config
 
     def _run_scanner_healthcheck(self) -> None:
         if self._engine_busy or self._scanner_busy:
@@ -2351,6 +2453,11 @@ class MainWindow(QMainWindow):
                         f"- desired_count={len(scan_result.desired_universe)}",
                         f"- applied_count={len(scan_result.applied_universe)}",
                         f"- realreg_count={len(self.scanner_current_universe)}",
+                        f"- last_attempt={self.last_scanner_attempt_ts}",
+                        f"- last_ok={self.last_scanner_ok_ts}",
+                        f"- candidate_source={self.scanner_config.candidate_source}",
+                        f"- market_code={self.scanner_config.market_code}",
+                        f"- tr_trace={self.last_scanner_tr_meta}",
                     ]
                 )
             else:
@@ -2358,8 +2465,13 @@ class MainWindow(QMainWindow):
                     [
                         "",
                         "[HEALTHCHECK_SCANNER]",
-                        "- last_scan_ts=없음",
+                        f"- last_scan_ts={self.last_scanner_attempt_ts or '없음'}",
                         f"- candidates_count={len(candidates)}",
+                        f"- last_attempt={self.last_scanner_attempt_ts}",
+                        f"- last_ok={self.last_scanner_ok_ts}",
+                        f"- candidate_source={self.scanner_config.candidate_source}",
+                        f"- market_code={self.scanner_config.market_code}",
+                        f"- tr_trace={self.last_scanner_tr_meta}",
                         "- 스캐너 결과가 없습니다. 조건 실행 또는 스캔 타이머를 확인하세요.",
                     ]
                 )

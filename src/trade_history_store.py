@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from .app_paths import get_trade_db_path
 
 @dataclass
 class TradeEvent:
@@ -36,7 +37,7 @@ class TradeHistoryStore:
     """Persist trade events into a local SQLite DB."""
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
-        self.db_path = db_path or (Path(__file__).resolve().parent.parent / "logs" / "trade_history.db")
+        self.db_path = db_path or get_trade_db_path()
         self._ensure_parent()
         self.init_db()
 

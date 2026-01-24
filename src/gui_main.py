@@ -3,6 +3,7 @@
 import datetime
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -51,6 +52,14 @@ except ImportError as exc:  # pragma: no cover - environment may lack PyQt5
 if sys.version_info < (3, 8):  # pragma: no cover - defensive guard for old installs
     raise SystemExit("Python 3.8+ is required to run the GUI. Please upgrade your interpreter.")
 
+from .app_paths import (
+    ensure_data_dirs,
+    get_data_dir,
+    get_monitor_snapshot_path,
+    get_opportunity_dir,
+    get_reports_dir,
+    get_settings_ini_path,
+)
 from .config import AppConfig, load_config
 from .condition_manager import ConditionManager
 from .kiwoom_client import KiwoomClient
@@ -66,6 +75,7 @@ from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
 from .logging_setup import configure_logging
 from .gui_reports import ReportsWidget
+from .persistence import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -219,14 +229,31 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mystock02 Auto Trader")
 
-        self.settings = QSettings("Mystock02", "AutoTrader")
+        self.data_dir = ensure_data_dirs()
+
+        self.settings = QSettings(str(get_settings_ini_path()), QSettings.IniFormat)
+        self.settings.setFallbacksEnabled(False)
+
+        self.secure_settings = QSettings("Mystock02", "AutoTrader")
+
+        if not get_settings_ini_path().exists() or len(self.settings.allKeys()) == 0:
+            try:
+                allow_prefixes = ("ui/", "strategy/", "universe/", "builder/", "test/")
+                for key in self.secure_settings.allKeys():
+                    if key.startswith(allow_prefixes):
+                        self.settings.setValue(key, self.secure_settings.value(key))
+                self.settings.sync()
+                logger.info("[MIGRATE] legacy registry settings -> ini done")
+            except Exception as exc:
+                logger.info("[MIGRATE] skipped: %s", exc)
+
         self.history_store = TradeHistoryStore()
         self.current_config = load_config()
         self.strategy = Strategy()
         self.kiwoom_client = KiwoomClient(
-            account_no=self.settings.value("connection/real/account_no", self.current_config.account_no),
-            app_key=self.settings.value("connection/real/app_key", self.current_config.app_key),
-            app_secret=self.settings.value("connection/real/app_secret", self.current_config.app_secret),
+            account_no=self.secure_settings.value("connection/real/account_no", self.current_config.account_no),
+            app_key=self.secure_settings.value("connection/real/app_key", self.current_config.app_key),
+            app_secret=self.secure_settings.value("connection/real/app_secret", self.current_config.app_secret),
             history_store=self.history_store,
         )
         self.openapi_widget: Optional[KiwoomOpenAPI] = None
@@ -262,6 +289,10 @@ class MainWindow(QMainWindow):
         self._last_real_condition_ts: float | None = None
         self._monitor_last_update: dict[str, str] = {}
         self._monitor_events: list[dict] = []
+        self.monitor_snapshot_path = get_monitor_snapshot_path()
+        self._persist_monitor_timer = QTimer(self)
+        self._persist_monitor_timer.setSingleShot(True)
+        self._persist_monitor_timer.timeout.connect(self._save_monitor_snapshot)
         self._universe_refresh_scheduled: bool = False
         self.universe_mode: str = "condition"
         self.test_universe: set[str] = set()
@@ -292,7 +323,7 @@ class MainWindow(QMainWindow):
         self.scanner_current_universe: list[str] = []
         self.scanner_config = ScannerConfig()
         self.scanner = ScannerEngine(self.selector.score_candidates, config=self.scanner_config)
-        self.opportunity_tracker = MissedOpportunityTracker(Path("logs"))
+        self.opportunity_tracker = MissedOpportunityTracker(get_opportunity_dir())
         self._last_scan_result = None
         self._scanner_next_run_at: Optional[datetime.datetime] = None
         self.last_scanner_attempt_ts: Optional[datetime.datetime] = None
@@ -335,6 +366,7 @@ class MainWindow(QMainWindow):
         self._refresh_account()
         self._refresh_positions()
         self._update_connection_labels()
+        self._load_monitor_snapshot()
 
     # Layout helpers -----------------------------------------------------
     def _build_layout(self) -> None:
@@ -754,11 +786,18 @@ class MainWindow(QMainWindow):
 
         tab_log = QWidget()
         tab_log_layout = QVBoxLayout()
+        log_bar = QHBoxLayout()
+        self.data_dir_label = QLabel(f"DATA: {str(self.data_dir)}")
+        self.open_data_dir_btn = QPushButton("데이터 폴더 열기")
+        log_bar.addWidget(self.data_dir_label)
+        log_bar.addStretch(1)
+        log_bar.addWidget(self.open_data_dir_btn)
+        tab_log_layout.addLayout(log_bar)
         tab_log_layout.addWidget(self.log_view)
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
 
-        report_widget = ReportsWidget(self.history_store, parent=self)
+        report_widget = ReportsWidget(self.history_store, reports_dir=get_reports_dir(), parent=self)
         self.main_tabs.addTab(wrap_tab(report_widget), "리포트")
 
         main.addWidget(self.main_tabs)
@@ -787,6 +826,7 @@ class MainWindow(QMainWindow):
         self.config_btn.clicked.connect(self.on_open_config)
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.history_button.clicked.connect(self._open_trade_history)
+        self.open_data_dir_btn.clicked.connect(self._open_data_dir)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.preview_candidates_btn.clicked.connect(self._preview_candidates)
@@ -989,7 +1029,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue(prefix + "buy_offset_ticks", self.buy_price_offset_ticks.value())
         self.settings.setValue(prefix + "eod_time", self.eod_time_edit.time().toString("HH:mm"))
         if mode == "real":
-            self.settings.setValue("connection/real/account_no", self.account_combo.currentText())
+            self.secure_settings.setValue("connection/real/account_no", self.account_combo.currentText())
+            self.secure_settings.sync()
         # universe / gating
         uni_prefix = "universe/"
         self.settings.setValue(uni_prefix + "trigger", self.trigger_combo.currentData())
@@ -1254,7 +1295,7 @@ class MainWindow(QMainWindow):
         self._save_current_settings()
 
     def on_open_config(self) -> None:
-        dialog = ConfigDialog(self, self.current_config, self.kiwoom_client, self.settings, self._settings_mode())
+        dialog = ConfigDialog(self, self.current_config, self.kiwoom_client, self.secure_settings, self._settings_mode())
         if dialog.exec_() == QDialog.Accepted and dialog.result_config:
             self.current_config = dialog.result_config
             self.engine.update_credentials(self.current_config)
@@ -2755,6 +2796,67 @@ class MainWindow(QMainWindow):
         dialog = TradeHistoryDialog(self.history_store, self)
         dialog.exec_()
 
+    def _load_monitor_snapshot(self) -> None:
+        snap = load_json(self.monitor_snapshot_path, default=None)
+        if not snap:
+            return
+        try:
+            self._monitor_events = list(snap.get("events", []) or [])
+            self._refresh_monitor_events()
+
+            rows = snap.get("rows", []) or []
+            if hasattr(self, "monitor_result_table"):
+                self.monitor_result_table.setRowCount(len(rows))
+                for r, row in enumerate(rows):
+                    self.monitor_result_table.setItem(r, 0, QTableWidgetItem(str(row.get("code", ""))))
+                    self.monitor_result_table.setItem(r, 1, QTableWidgetItem(str(row.get("name", ""))))
+                    self.monitor_result_table.setItem(r, 2, QTableWidgetItem(str(row.get("status", ""))))
+                    self.monitor_result_table.setItem(r, 3, QTableWidgetItem(str(row.get("last_ts", ""))))
+                self.monitor_result_table.resizeColumnsToContents()
+
+            self._log(
+                f"[PERSIST] 모니터 스냅샷 복원 완료 events={len(self._monitor_events)} rows={len(rows)}"
+            )
+        except Exception as exc:
+            self._log(f"[PERSIST][WARN] 모니터 스냅샷 복원 실패: {exc}")
+
+    def _schedule_save_monitor_snapshot(self) -> None:
+        if self._persist_monitor_timer.isActive():
+            self._persist_monitor_timer.start(500)
+        else:
+            self._persist_monitor_timer.start(500)
+
+    def _save_monitor_snapshot(self) -> None:
+        try:
+            rows = []
+            if hasattr(self, "monitor_result_table"):
+                for r in range(self.monitor_result_table.rowCount()):
+                    rows.append(
+                        {
+                            "code": self.monitor_result_table.item(r, 0).text()
+                            if self.monitor_result_table.item(r, 0)
+                            else "",
+                            "name": self.monitor_result_table.item(r, 1).text()
+                            if self.monitor_result_table.item(r, 1)
+                            else "",
+                            "status": self.monitor_result_table.item(r, 2).text()
+                            if self.monitor_result_table.item(r, 2)
+                            else "",
+                            "last_ts": self.monitor_result_table.item(r, 3).text()
+                            if self.monitor_result_table.item(r, 3)
+                            else "",
+                        }
+                    )
+            payload = {
+                "ts": datetime.datetime.now().isoformat(),
+                "events": self._monitor_events[-2000:],
+                "rows": rows,
+            }
+            save_json(self.monitor_snapshot_path, payload)
+            logger.info("[PERSIST] monitor snapshot saved: %s", str(self.monitor_snapshot_path))
+        except Exception as exc:
+            logger.info("[PERSIST] monitor snapshot save failed: %s", exc)
+
     def _add_monitor_event(self, event_type: str, condition_name: str, code: str, note: str = "") -> None:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         name = self._get_symbol_name(code) if code else ""
@@ -2771,6 +2873,7 @@ class MainWindow(QMainWindow):
         if len(self._monitor_events) > max_rows:
             self._monitor_events = self._monitor_events[-max_rows:]
         self._refresh_monitor_events()
+        self._schedule_save_monitor_snapshot()
 
     def _refresh_monitor_results(self) -> None:
         selected_name = self.monitor_condition_combo.currentData()
@@ -2817,6 +2920,7 @@ class MainWindow(QMainWindow):
         self.monitor_status_label.setText(
             "마지막 수신: - / 현재 결과: 0건 (조건 실행 전이거나 이벤트 미수신)"
         )
+        self._schedule_save_monitor_snapshot()
 
     def _export_monitor_csv(self) -> None:
         base_path, _ = QFileDialog.getSaveFileName(self, "CSV 저장", "", "CSV Files (*.csv)")
@@ -3004,8 +3108,21 @@ class MainWindow(QMainWindow):
         if hasattr(self, "main_tabs"):
             self.settings.setValue("ui/main_tab_index", self.main_tabs.currentIndex())
         self.settings.setValue("ui/window_geometry", self.saveGeometry())
+        self._save_monitor_snapshot()
         self.settings.sync()
         super().closeEvent(event)
+
+    def _open_data_dir(self) -> None:
+        try:
+            path = str(self.data_dir)
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # noqa: S606,S607
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            self._log(f"[UI][WARN] 데이터 폴더 열기 실패: {exc}")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

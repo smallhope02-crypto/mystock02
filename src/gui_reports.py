@@ -33,9 +33,13 @@ from .trade_history_store import TradeHistoryStore
 
 
 class ReportsWidget(QWidget):
-    def __init__(self, store: TradeHistoryStore, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self, store: TradeHistoryStore, reports_dir: Path | str, parent: Optional[QWidget] = None
+    ) -> None:
         super().__init__(parent)
         self.store = store
+        self.reports_dir = Path(reports_dir)
+        (self.reports_dir / "snapshots").mkdir(parents=True, exist_ok=True)
         self._last_units = []
         self._last_symbol_perf = []
         self._last_daily = None
@@ -165,6 +169,7 @@ class ReportsWidget(QWidget):
             self._last_symbol_perf = symbol_perf
             self._last_daily = daily
             self._update_tables(symbol_perf, daily, winloss_mode, fills, units)
+            self._save_snapshot(start_dt, end_dt, mode, winloss_mode, fills, units, symbol_perf, daily)
 
         QTimer.singleShot(0, work)
 
@@ -235,6 +240,63 @@ class ReportsWidget(QWidget):
         self._fill_rank_table(self.top_table, top_sorted)
         self._fill_rank_table(self.bottom_table, bottom_sorted)
 
+    def _save_snapshot(
+        self,
+        start_dt,
+        end_dt,
+        mode,
+        winloss_mode,
+        fills,
+        units,
+        symbol_perf,
+        daily,
+    ) -> None:
+        try:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            snap_path = self.reports_dir / "snapshots" / f"report_{ts}.json"
+            payload = {
+                "ts": ts,
+                "period": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+                "mode": mode,
+                "winloss_mode": winloss_mode,
+                "counts": {
+                    "fills": len(fills),
+                    "units": len(units),
+                    "symbols": len(symbol_perf) if symbol_perf else 0,
+                },
+                "summary": {
+                    "net_pnl_sum": getattr(daily, "net_pnl_sum", 0) if daily else 0,
+                    "gross_pnl_sum": getattr(daily, "gross_pnl_sum", 0) if daily else 0,
+                    "wins": getattr(daily, "wins", 0) if daily else 0,
+                    "losses": getattr(daily, "losses", 0) if daily else 0,
+                    "win_rate": getattr(daily, "win_rate", 0) if daily else 0,
+                },
+                "symbol_perf_top": [
+                    {
+                        "code": p.code,
+                        "name": p.name,
+                        "trades": p.trades,
+                        "wins": p.wins,
+                        "losses": p.losses,
+                        "win_rate": p.win_rate,
+                        "net_pnl_sum": p.net_pnl_sum,
+                        "return_pct": p.return_pct,
+                    }
+                    for p in (symbol_perf[:200] if symbol_perf else [])
+                ],
+            }
+            from .persistence import save_json
+            from .app_paths import get_reports_last_path
+
+            save_json(snap_path, payload)
+            save_json(get_reports_last_path(), payload)
+            self.status_label.setText(self.status_label.text() + " / 스냅샷 저장됨")
+        except Exception as exc:
+            try:
+                self.status_label.setText(self.status_label.text() + f" / 스냅샷 저장 실패: {exc}")
+            except Exception:
+                pass
+
     def _fill_rank_table(self, table: QTableWidget, rows) -> None:
         table.setRowCount(len(rows))
         for idx, perf in enumerate(rows):
@@ -250,7 +312,10 @@ class ReportsWidget(QWidget):
             self.status_label.setText("내보낼 종목성과 데이터가 없습니다.")
             return
         filename = f"catch_like_symbol_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        path_str, _ = QFileDialog.getSaveFileName(self, "종목성과 CSV 저장", filename, "CSV Files (*.csv)")
+        default_dir = str(self.reports_dir / "exports")
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "종목성과 CSV 저장", str(Path(default_dir) / filename), "CSV Files (*.csv)"
+        )
         if not path_str:
             return
         rows = []
@@ -284,12 +349,18 @@ class ReportsWidget(QWidget):
             self.status_label.setText("내보낼 보고서 데이터가 없습니다.")
             return
         filename = f"catch_like_daily_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        path_str, _ = QFileDialog.getSaveFileName(self, "당일 보고서 CSV 저장", filename, "CSV Files (*.csv)")
+        default_dir = str(self.reports_dir / "exports")
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "당일 보고서 CSV 저장", str(Path(default_dir) / filename), "CSV Files (*.csv)"
+        )
         if not path_str:
             return
         daily = self._last_daily
         rows = []
-        rows.append({"meta": f"기간={self.start_date.text()}~{self.end_date.text()} 모드={self.mode_combo.currentText()} 승패={self.winloss_combo.currentText()}"})
+        meta = (
+            f"기간={self.start_date.text()}~{self.end_date.text()} "
+            f"모드={self.mode_combo.currentText()} 승패={self.winloss_combo.currentText()}"
+        )
         rows.append({"KPI": "총거래", "값": daily.total_trades})
         rows.append({"KPI": "성공/실패", "값": f"{daily.wins}/{daily.losses} ({daily.win_rate:.1f}%)"})
         rows.append({"KPI": "실현손익(세전)", "값": daily.gross_pnl_sum})
@@ -331,7 +402,7 @@ class ReportsWidget(QWidget):
                     "실현손익(세후)": perf.net_pnl_sum,
                 }
             )
-        self._write_csv(Path(path_str), rows, meta=None)
+        self._write_csv(Path(path_str), rows, meta=meta)
 
     @staticmethod
     def _write_csv(path: Path, rows: list[dict], meta: Optional[str]) -> None:
@@ -339,9 +410,21 @@ class ReportsWidget(QWidget):
             path.write_text("", encoding="utf-8")
             return
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            # rows는 섹션별로 컬럼이 달라질 수 있으므로, 모든 키의 합집합으로 header 구성
+            fieldnames: list[str] = []
+            seen: set[str] = set()
+            for r in rows:
+                for k in r.keys():
+                    if k not in seen:
+                        fieldnames.append(k)
+                        seen.add(k)
+
+            if not fieldnames:
+                return
+
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             if meta:
-                writer.writerow({"meta": meta})
+                handle.write(f"# {meta}\n")
             for row in rows:
                 writer.writerow(row)

@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Iterable
 
+from .app_paths import get_logs_dir
 
 _LOGGER: logging.Logger | None = None
 
@@ -24,7 +25,7 @@ def get_condition_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if not logger.handlers:
-        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        log_dir = get_logs_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "condition.log"
         handler = RotatingFileHandler(

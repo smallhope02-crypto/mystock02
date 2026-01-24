@@ -15,10 +15,12 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.app_paths import ensure_data_dirs, get_logs_dir
 from src.logging_setup import configure_logging
 from src.gui_main import main
 
 
 if __name__ == "__main__":
-    configure_logging()
+    ensure_data_dirs()
+    configure_logging(get_logs_dir())
     main()

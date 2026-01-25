@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Sequence
 
 try:
     from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
+    from PyQt5.QtGui import QFontMetrics
     from PyQt5.QtWidgets import (
         QApplication,
         QAbstractScrollArea,
@@ -250,8 +251,9 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logger.info("[MIGRATE] skipped: %s", exc)
 
+        backup_mode = str(self.settings.value("backup/mode", "zip"))
         self.backup = BackupManager(
-            self.data_dir, keep_last=int(self.settings.value("backup/keep_last", 30))
+            self.data_dir, keep_last=int(self.settings.value("backup/keep_last", 30)), mode=backup_mode
         )
         self.last_backup_label_text = ""
         self._backup_last_payload: dict = {}
@@ -384,6 +386,7 @@ class MainWindow(QMainWindow):
             )
             # 상태가 비활성이라면 사용자 버튼 클릭 시 재초기화를 안내한다.
         self._load_settings()
+        self._maybe_restore_paper_from_db(trigger="startup")
         self._apply_mode_enable()
         self._refresh_condition_list()
         self._refresh_account()
@@ -809,29 +812,44 @@ class MainWindow(QMainWindow):
 
         tab_log = QWidget()
         tab_log_layout = QVBoxLayout()
-        log_bar = QHBoxLayout()
-        self.data_dir_label = QLabel(f"DATA DIR: {self.data_dir}")
+
+        top_wrap = QVBoxLayout()
+
+        info_row = QHBoxLayout()
+        self.data_dir_label = QLabel("DATA: -")
         self.backup_status_label = QLabel("BACKUP: (unknown)")
-        self.backup_count_label = QLabel("FILES: 0")
         self.last_backup_label = QLabel("LAST: (none)")
+        self.backup_count_label = QLabel("FILES: 0")
         self.backup_path_label = QLabel("PATH: -")
         self.backup_err_label = QLabel("")
+
+        for lb in (self.data_dir_label, self.backup_path_label):
+            lb.setToolTip("")
+            lb.setMinimumWidth(200)
+            lb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        info_row.addWidget(self.data_dir_label, 3)
+        info_row.addWidget(self.backup_status_label)
+        info_row.addWidget(self.last_backup_label)
+        info_row.addWidget(self.backup_count_label)
+        info_row.addWidget(self.backup_path_label, 2)
+        info_row.addWidget(self.backup_err_label, 2)
+        top_wrap.addLayout(info_row)
+
+        btn_row = QHBoxLayout()
+        self.open_data_dir_btn = QPushButton("폴더 열기")
+        self.change_data_dir_btn = QPushButton("데이터 경로 변경")
         self.backup_now_btn = QPushButton("지금 백업")
-        self.restore_wizard_btn = QPushButton("복원 마법사...")
-        self.open_data_dir_btn = QPushButton("데이터 폴더 열기")
-        self.change_data_dir_btn = QPushButton("데이터 폴더 변경...")
-        log_bar.addWidget(self.data_dir_label)
-        log_bar.addStretch(1)
-        log_bar.addWidget(self.backup_status_label)
-        log_bar.addWidget(self.backup_count_label)
-        log_bar.addWidget(self.last_backup_label)
-        log_bar.addWidget(self.backup_path_label)
-        log_bar.addWidget(self.backup_now_btn)
-        log_bar.addWidget(self.restore_wizard_btn)
-        log_bar.addWidget(self.open_data_dir_btn)
-        log_bar.addWidget(self.change_data_dir_btn)
-        tab_log_layout.addLayout(log_bar)
-        tab_log_layout.addWidget(self.backup_err_label)
+        self.restore_wizard_btn = QPushButton("복원 마법사")
+
+        btn_row.addWidget(self.open_data_dir_btn)
+        btn_row.addWidget(self.change_data_dir_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.backup_now_btn)
+        btn_row.addWidget(self.restore_wizard_btn)
+        top_wrap.addLayout(btn_row)
+
+        tab_log_layout.addLayout(top_wrap)
         tab_log_layout.addWidget(self.log_view)
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
@@ -965,6 +983,49 @@ class MainWindow(QMainWindow):
     # Settings ---------------------------------------------------------
     def _settings_mode(self) -> str:
         return "paper" if self.paper_radio.isChecked() else "real"
+
+    def _paper_restore_enabled(self) -> bool:
+        return bool(int(self.settings.value("paper_restore/enabled", 1)))
+
+    def _paper_restore_range(self) -> tuple[str, str]:
+        now = datetime.datetime.now()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _maybe_restore_paper_from_db(self, trigger: str = "manual") -> None:
+        try:
+            if self.engine.broker_mode != "paper":
+                return
+            if not self._paper_restore_enabled():
+                self._log(f"[PAPER_RESTORE] disabled (trigger={trigger})")
+                return
+
+            db_path = self.data_dir / "trade" / "trade_history.db"
+            if not db_path.exists():
+                self._log(f"[PAPER_RESTORE] db not found: {db_path}")
+                return
+
+            start_ts, end_ts = self._paper_restore_range()
+            fallback_cash = float(self.paper_cash_input.value())
+
+            self._log(
+                f"[PAPER_RESTORE] start trigger={trigger} range={start_ts}~{end_ts} fallback_cash={fallback_cash}"
+            )
+            payload = self.engine.restore_paper_state_from_history(
+                self.history_store,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                fallback_cash=fallback_cash,
+            )
+            self._log(
+                f"[PAPER_RESTORE] end trigger={trigger} ok={payload.get('ok')} positions={len(payload.get('positions', {}))} cash={payload.get('cash')}"
+            )
+            if payload.get("warnings"):
+                self._log(f"[PAPER_RESTORE] warnings={payload['warnings'][:5]}")
+
+            self._refresh_account_and_positions()
+        except Exception as exc:
+            self._log(f"[PAPER_RESTORE][ERR] {exc}")
 
     def _load_settings(self) -> None:
         mode = self.settings.value("ui/mode", "paper")
@@ -3189,6 +3250,7 @@ class MainWindow(QMainWindow):
                 "데이터 폴더 경로를 저장했습니다.\n프로그램을 재시작하면 새 폴더에서 자동 복원됩니다.",
             )
             self._log(f"[PERSIST] storage/data_dir updated -> {path}")
+            self._refresh_topbar_paths()
         except Exception as exc:
             self._log(f"[UI][WARN] 데이터 폴더 변경 실패: {exc}")
 
@@ -3230,6 +3292,29 @@ class MainWindow(QMainWindow):
         else:
             self.backup_status_label.setText("BACKUP: (unknown)")
             self.backup_err_label.setText("")
+        self._refresh_topbar_paths()
+
+    def _elide_middle(self, text: str, widget: QLabel) -> str:
+        fm = QFontMetrics(widget.font())
+        width = max(widget.width() - 10, 100)
+        return fm.elidedText(text, Qt.ElideMiddle, width)
+
+    def _refresh_topbar_paths(self) -> None:
+        full_data = str(self.data_dir)
+        self.data_dir_label.setToolTip(full_data)
+        self.data_dir_label.setText("DATA: " + self._elide_middle(full_data, self.data_dir_label))
+
+        payload = getattr(self, "_backup_last_payload", {}) or {}
+        path_text = str(payload.get("dir") or "-")
+        self.backup_path_label.setToolTip(path_text)
+        self.backup_path_label.setText("PATH: " + self._elide_middle(path_text, self.backup_path_label))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        try:
+            self._refresh_topbar_paths()
+        except Exception:
+            pass
 
     def _run_backup_ui(self, reason: str) -> None:
         try:
@@ -3251,6 +3336,8 @@ class MainWindow(QMainWindow):
 
     def _on_restored(self, payload: dict) -> None:
         self._log(f"[RESTORE] result={payload}")
+        self._maybe_restore_paper_from_db(trigger="restore_wizard")
+        self._refresh_account_and_positions()
         QMessageBox.information(
             self,
             "복원 완료",

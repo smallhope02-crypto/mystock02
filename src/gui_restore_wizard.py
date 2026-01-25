@@ -4,6 +4,8 @@ import json
 import logging
 import sqlite3
 import shutil
+import datetime
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +36,8 @@ class RestoreWizard(QDialog):
         self.current_data_dir = Path(current_data_dir)
         self.secure_settings = secure_settings
         self.source_dir: Optional[Path] = None
+        self._extracted_dir: Optional[Path] = None
+        self._extracted_from: Optional[Path] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -74,19 +78,46 @@ class RestoreWizard(QDialog):
         logger.info(message)
 
     def _choose_source(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "복원 소스 선택", str(self.current_data_dir))
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "복원 ZIP 선택(선택사항)", str(self.current_data_dir), "Zip (*.zip)"
+        )
+        if file_path:
+            self.source_dir = Path(file_path)
+            self.source_label.setText(f"소스: {self.source_dir}")
+            self._log(f"[RESTORE] zip source selected: {self.source_dir}")
+            return
+
+        path = QFileDialog.getExistingDirectory(self, "복원 소스 폴더 선택", str(self.current_data_dir))
         if not path:
             return
         self.source_dir = Path(path)
         self.source_label.setText(f"소스: {self.source_dir}")
-        self._log(f"[RESTORE] source selected: {self.source_dir}")
+        self._log(f"[RESTORE] dir source selected: {self.source_dir}")
+
+    def _effective_source_dir(self) -> Optional[Path]:
+        if not self.source_dir:
+            return None
+        if self.source_dir.is_file() and self.source_dir.suffix.lower() == ".zip":
+            if self._extracted_dir and self._extracted_from == self.source_dir:
+                return self._extracted_dir
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            tmp = self.current_data_dir / "backups" / f"_tmp_restore_{ts}"
+            tmp.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(str(self.source_dir), "r") as zf:
+                zf.extractall(str(tmp))
+            self._log(f"[RESTORE] zip extracted -> {tmp}")
+            self._extracted_dir = tmp
+            self._extracted_from = self.source_dir
+            return tmp
+        return self.source_dir
 
     def _scan_source(self) -> None:
-        if not self.source_dir:
+        src = self._effective_source_dir()
+        if not src:
             self._log("[RESTORE] 소스를 먼저 선택하세요.")
             return
         self.items_list.clear()
-        found = self._scan_items(self.source_dir)
+        found = self._scan_items(src)
         for item in found:
             self.items_list.addItem(item)
         self._log(f"[RESTORE] scan 완료: items={len(found)}")
@@ -103,6 +134,8 @@ class RestoreWizard(QDialog):
         direct = {
             "settings.ini": source_dir / "settings.ini",
             "trade_history.db": source_dir / "trade_history.db",
+            "trade_history.db-wal": source_dir / "trade_history.db-wal",
+            "trade_history.db-shm": source_dir / "trade_history.db-shm",
             "logs": source_dir / "logs",
             "monitor_snapshot.json": source_dir / "monitor_snapshot.json",
             "reports": source_dir / "reports",
@@ -111,6 +144,8 @@ class RestoreWizard(QDialog):
         nested = {
             "settings.ini": source_dir / "config" / "settings.ini",
             "trade_history.db": source_dir / "trade" / "trade_history.db",
+            "trade_history.db-wal": source_dir / "trade" / "trade_history.db-wal",
+            "trade_history.db-shm": source_dir / "trade" / "trade_history.db-shm",
             "logs": source_dir / "logs",
             "monitor_snapshot.json": source_dir / "monitor" / "monitor_snapshot.json",
             "reports": source_dir / "reports",
@@ -119,20 +154,36 @@ class RestoreWizard(QDialog):
         return nested if (source_dir / "config").exists() else direct
 
     def _restore(self) -> None:
-        if not self.source_dir:
+        src = self._effective_source_dir()
+        if not src:
             self._log("[RESTORE] 소스를 먼저 선택하세요.")
             return
+
+        if self.backup_before_restore.isChecked():
+            try:
+                from .backup_manager import BackupManager
+
+                backup_mode = "zip"
+                if self.secure_settings is not None:
+                    backup_mode = str(self.secure_settings.value("backup/mode", "zip"))
+                bm = BackupManager(self.current_data_dir, keep_last=30, mode=backup_mode)
+                bm.run_backup(reason="pre_restore")
+                self._log("[RESTORE] pre-backup completed")
+            except Exception as exc:
+                self._log(f"[RESTORE][WARN] pre-backup failed: {exc}")
 
         self._log("[RESTORE] restore start")
         errors: list[str] = []
         copied_files = 0
 
-        candidates = self._source_candidates(self.source_dir)
+        candidates = self._source_candidates(src)
         target = self.current_data_dir
 
         mapping = {
             "settings.ini": target / "config" / "settings.ini",
             "trade_history.db": target / "trade" / "trade_history.db",
+            "trade_history.db-wal": target / "trade" / "trade_history.db-wal",
+            "trade_history.db-shm": target / "trade" / "trade_history.db-shm",
             "logs": target / "logs",
             "monitor_snapshot.json": target / "monitor" / "monitor_snapshot.json",
             "reports": target / "reports",

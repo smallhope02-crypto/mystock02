@@ -43,6 +43,28 @@ class PaperBroker:
         self.cash = float(cash)
         self.positions = {}
         logger.info("Paper cash initialized to %.2f", self.cash)
+        # --- PATCH: paper_reset 이벤트 기록(재구성 기준점) ---
+        try:
+            if self.history_store:
+                payload = TradeHistoryStore.encode_raw({"cash": float(self.cash)})
+                self.history_store.insert_event(
+                    {
+                        "mode": "paper",
+                        "event_type": "paper_reset",
+                        "code": "",
+                        "side": "",
+                        "order_qty": 0,
+                        "order_price": int(self.cash),
+                        "exec_qty": 0,
+                        "exec_price": 0,
+                        "status": "ok",
+                        "raw_json": payload,
+                    }
+                )
+        except Exception:
+            # 백업용 로깅이므로 실패해도 본 동작은 유지
+            pass
+        # --- PATCH END ---
 
     def get_current_price(self, symbol: str) -> float:
         """Return a deterministic pseudo-price for testing purposes."""

@@ -11,9 +11,12 @@ from typing import Callable, Dict, List, Optional, Sequence
 from .config import AppConfig
 from .kiwoom_client import KiwoomClient
 from .paper_broker import PaperBroker
+from .paper_restore import restore_paper_state_from_db
 from .selector import UniverseSelector
 from .strategy import Order, Strategy
 from .price_tick import shift_price_by_ticks
+from .paper_broker import PaperPosition
+from .strategy import Position
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +273,64 @@ class TradeEngine:
         if self.buy_order_mode == "limit":
             return float(shift_price_by_ticks(base, self.buy_price_offset_ticks))
         return base
+
+    def restore_paper_state_from_history(
+        self,
+        history_store,
+        start_ts: str,
+        end_ts: str,
+        fallback_cash: float,
+        log_prefix: str = "PAPER_RESTORE",
+    ) -> dict:
+        """
+        trade_history.db 기반으로 paper_broker + strategy + 당일 buy_count를 동기화.
+        """
+        if self.broker_mode != "paper":
+            return {"ok": False, "reason": "not paper mode"}
+
+        db_path = getattr(history_store, "db_path", None)
+        if not db_path:
+            return {"ok": False, "reason": "history_store.db_path missing"}
+
+        result = restore_paper_state_from_db(db_path, start_ts, end_ts, fallback_cash)
+
+        if result.ok:
+            self.paper_broker.cash = float(result.cash)
+            self.paper_broker.positions.clear()
+            for sym, pos in result.positions.items():
+                self.paper_broker.positions[sym] = PaperPosition(
+                    symbol=sym, quantity=int(pos.qty), average_price=float(pos.avg_price)
+                )
+
+            self.strategy.cash = float(result.cash)
+            self.strategy.positions.clear()
+            now = datetime.datetime.utcnow()
+            for sym, pos in result.positions.items():
+                self.strategy.positions[sym] = Position(
+                    symbol=sym,
+                    quantity=int(pos.qty),
+                    entry_price=float(pos.avg_price),
+                    highest_price=float(pos.avg_price),
+                    entry_time=now,
+                )
+
+            self._reset_daily_if_needed()
+            self.bought_today_symbols.clear()
+            self.buy_count_today.clear()
+            for sym, cnt in (result.buy_count_today or {}).items():
+                if cnt > 0:
+                    self.bought_today_symbols.add(sym)
+                    self.buy_count_today[sym] = int(cnt)
+
+        payload = {
+            "ok": result.ok,
+            "base_cash": result.base_cash,
+            "cash": result.cash,
+            "positions": {k: {"qty": v.qty, "avg": v.avg_price} for k, v in result.positions.items()},
+            "buy_count_today": result.buy_count_today,
+            "warnings": result.warnings,
+            "scanned_events": result.scanned_events,
+            "used_reset": result.used_reset,
+            "range": {"start": start_ts, "end": end_ts},
+        }
+        return payload

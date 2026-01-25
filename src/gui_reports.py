@@ -422,9 +422,9 @@ class ReportsWidget(QWidget):
             if not fieldnames:
                 return
 
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
             if meta:
                 handle.write(f"# {meta}\n")
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
             for row in rows:
                 writer.writerow(row)

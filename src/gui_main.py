@@ -74,6 +74,7 @@ from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
 from .logging_setup import configure_logging
 from .backup_manager import BackupManager
+from .gui_restore_wizard import RestoreWizard
 from .gui_reports import ReportsWidget
 from .persistence import load_json, save_json
 
@@ -253,6 +254,7 @@ class MainWindow(QMainWindow):
             self.data_dir, keep_last=int(self.settings.value("backup/keep_last", 30))
         )
         self.last_backup_label_text = ""
+        self._backup_last_payload: dict = {}
         logger.info(
             "[PERSIST] data_dir=%s settings_ini=%s",
             self.data_dir,
@@ -370,6 +372,8 @@ class MainWindow(QMainWindow):
         self.eod_executed_today: Optional[datetime.date] = None
 
         self._build_layout()
+        self._load_backup_status()
+        self._update_backup_status_labels()
         self._load_preset_list()
         self._connect_signals()
         if getattr(self.kiwoom_client, "openapi", None):
@@ -807,15 +811,27 @@ class MainWindow(QMainWindow):
         tab_log_layout = QVBoxLayout()
         log_bar = QHBoxLayout()
         self.data_dir_label = QLabel(f"DATA DIR: {self.data_dir}")
-        self.last_backup_label = QLabel("LAST BACKUP: (none)")
+        self.backup_status_label = QLabel("BACKUP: (unknown)")
+        self.backup_count_label = QLabel("FILES: 0")
+        self.last_backup_label = QLabel("LAST: (none)")
+        self.backup_path_label = QLabel("PATH: -")
+        self.backup_err_label = QLabel("")
+        self.backup_now_btn = QPushButton("지금 백업")
+        self.restore_wizard_btn = QPushButton("복원 마법사...")
         self.open_data_dir_btn = QPushButton("데이터 폴더 열기")
         self.change_data_dir_btn = QPushButton("데이터 폴더 변경...")
         log_bar.addWidget(self.data_dir_label)
         log_bar.addStretch(1)
+        log_bar.addWidget(self.backup_status_label)
+        log_bar.addWidget(self.backup_count_label)
         log_bar.addWidget(self.last_backup_label)
+        log_bar.addWidget(self.backup_path_label)
+        log_bar.addWidget(self.backup_now_btn)
+        log_bar.addWidget(self.restore_wizard_btn)
         log_bar.addWidget(self.open_data_dir_btn)
         log_bar.addWidget(self.change_data_dir_btn)
         tab_log_layout.addLayout(log_bar)
+        tab_log_layout.addWidget(self.backup_err_label)
         tab_log_layout.addWidget(self.log_view)
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
@@ -853,6 +869,8 @@ class MainWindow(QMainWindow):
         self.history_button.clicked.connect(self._open_trade_history)
         self.open_data_dir_btn.clicked.connect(self._open_data_dir)
         self.change_data_dir_btn.clicked.connect(self._change_data_dir)
+        self.backup_now_btn.clicked.connect(lambda: self._run_backup_ui("manual"))
+        self.restore_wizard_btn.clicked.connect(self._open_restore_wizard)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.preview_candidates_btn.clicked.connect(self._preview_candidates)
@@ -3142,13 +3160,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("ui/main_tab_index", self.main_tabs.currentIndex())
         self.settings.setValue("ui/window_geometry", self.saveGeometry())
         self._save_monitor_snapshot()
-        try:
-            out = self.backup.run_backup(reason="exit")
-            if hasattr(self, "last_backup_label"):
-                self.last_backup_label.setText(f"LAST BACKUP: {self.backup.last_backup_ts}")
-            self._log(f"[BACKUP] exit backup saved -> {out}")
-        except Exception as exc:
-            self._log(f"[BACKUP][WARN] exit backup failed: {exc}")
+        self._run_backup_ui("exit")
         self.settings.sync()
         super().closeEvent(event)
 
@@ -3180,14 +3192,73 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log(f"[UI][WARN] 데이터 폴더 변경 실패: {exc}")
 
-    def _run_auto_backup(self) -> None:
+    def _backup_status_path(self) -> Path:
+        return self.data_dir / "backups" / "last_status.json"
+
+    def _persist_backup_status(self, ok: bool, out_dir: str, err: str) -> None:
+        payload = {
+            "ts": self.backup.last_backup_ts,
+            "ok": ok,
+            "files": int(self.backup.last_backup_count),
+            "dir": out_dir or (str(self.backup.last_backup_dir) if self.backup.last_backup_dir else ""),
+            "error": err or self.backup.last_backup_error,
+        }
+        save_json(self._backup_status_path(), payload)
+        self._backup_last_payload = payload
+
+    def _load_backup_status(self) -> None:
+        payload = load_json(self._backup_status_path(), default=None) or {}
+        self._backup_last_payload = payload
+
+    def _update_backup_status_labels(self) -> None:
+        payload = getattr(self, "_backup_last_payload", {}) or {}
+        ts = payload.get("ts") or "(none)"
+        ok = payload.get("ok", None)
+        files = payload.get("files", 0)
+        out_dir = payload.get("dir", "-")
+        err = payload.get("error", "")
+
+        self.last_backup_label.setText(f"LAST: {ts}")
+        self.backup_count_label.setText(f"FILES: {files}")
+        self.backup_path_label.setText(f"PATH: {out_dir}")
+        if ok is True:
+            self.backup_status_label.setText("BACKUP: OK")
+            self.backup_err_label.setText("")
+        elif ok is False:
+            self.backup_status_label.setText("BACKUP: FAIL")
+            self.backup_err_label.setText(err[:120])
+        else:
+            self.backup_status_label.setText("BACKUP: (unknown)")
+            self.backup_err_label.setText("")
+
+    def _run_backup_ui(self, reason: str) -> None:
         try:
-            out = self.backup.run_backup(reason="timer")
-            if hasattr(self, "last_backup_label"):
-                self.last_backup_label.setText(f"LAST BACKUP: {self.backup.last_backup_ts}")
-            self._log(f"[BACKUP] timer backup saved -> {out}")
+            self._log(f"[BACKUP] 요청 reason={reason}")
+            out = self.backup.run_backup(reason=reason)
+            self._persist_backup_status(ok=True, out_dir=str(out), err="")
+            self._update_backup_status_labels()
+            self._log(f"[BACKUP] 완료 out={out} files={self.backup.last_backup_count}")
         except Exception as exc:
-            self._log(f"[BACKUP][WARN] timer backup failed: {exc}")
+            err = f"{exc}"
+            self._persist_backup_status(ok=False, out_dir="", err=err)
+            self._update_backup_status_labels()
+            self._log(f"[BACKUP][ERR] 실패: {err}")
+
+    def _open_restore_wizard(self) -> None:
+        wizard = RestoreWizard(self, current_data_dir=self.data_dir, secure_settings=self.secure_settings)
+        wizard.restored.connect(self._on_restored)
+        wizard.exec_()
+
+    def _on_restored(self, payload: dict) -> None:
+        self._log(f"[RESTORE] result={payload}")
+        QMessageBox.information(
+            self,
+            "복원 완료",
+            "복원이 완료되었습니다.\n정확한 반영을 위해 프로그램을 재시작하는 것을 권장합니다.",
+        )
+
+    def _run_auto_backup(self) -> None:
+        self._run_backup_ui("timer")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

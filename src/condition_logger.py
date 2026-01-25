@@ -9,7 +9,12 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Iterable
 
-from .app_paths import get_logs_dir
+try:
+    from PyQt5.QtCore import QSettings  # type: ignore
+except Exception:  # pragma: no cover - fallback when Qt is unavailable
+    QSettings = None  # type: ignore
+
+from .app_paths import ensure_data_dirs, resolve_data_dir
 
 _LOGGER: logging.Logger | None = None
 
@@ -25,7 +30,16 @@ def get_condition_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if not logger.handlers:
-        log_dir = get_logs_dir()
+        user_dir = ""
+        if QSettings is not None:
+            try:
+                secure = QSettings("Mystock02", "AutoTrader")
+                user_dir = secure.value("storage/data_dir", "")
+            except Exception:
+                user_dir = ""
+        data_dir = resolve_data_dir(user_dir)
+        ensure_data_dirs(data_dir)
+        log_dir = data_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "condition.log"
         handler = RotatingFileHandler(

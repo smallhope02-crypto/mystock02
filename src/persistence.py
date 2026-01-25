@@ -13,7 +13,7 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
 
 
 def save_json(path: Path, obj: Any) -> None:
-    atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
+    atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_json(path: Path, default: Optional[Any] = None) -> Any:

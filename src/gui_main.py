@@ -54,11 +54,10 @@ if sys.version_info < (3, 8):  # pragma: no cover - defensive guard for old inst
 
 from .app_paths import (
     ensure_data_dirs,
-    get_data_dir,
-    get_monitor_snapshot_path,
-    get_opportunity_dir,
-    get_reports_dir,
-    get_settings_ini_path,
+    monitor_snapshot_path,
+    reports_dir,
+    resolve_data_dir,
+    settings_ini_path,
 )
 from .config import AppConfig, load_config
 from .condition_manager import ConditionManager
@@ -74,6 +73,7 @@ from .trade_history_store import TradeHistoryStore
 from .universe_diag import classify_universe_empty
 from .gui_trade_history import TradeHistoryDialog
 from .logging_setup import configure_logging
+from .backup_manager import BackupManager
 from .gui_reports import ReportsWidget
 from .persistence import load_json, save_json
 
@@ -229,14 +229,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mystock02 Auto Trader")
 
-        self.data_dir = ensure_data_dirs()
-
-        self.settings = QSettings(str(get_settings_ini_path()), QSettings.IniFormat)
-        self.settings.setFallbacksEnabled(False)
-
         self.secure_settings = QSettings("Mystock02", "AutoTrader")
 
-        if not get_settings_ini_path().exists() or len(self.settings.allKeys()) == 0:
+        user_dir = self.secure_settings.value("storage/data_dir", "")
+        self.data_dir = resolve_data_dir(user_dir)
+        ensure_data_dirs(self.data_dir)
+
+        self.settings = QSettings(str(settings_ini_path(self.data_dir)), QSettings.IniFormat)
+        self.settings.setFallbacksEnabled(False)
+
+        if not settings_ini_path(self.data_dir).exists() or len(self.settings.allKeys()) == 0:
             try:
                 allow_prefixes = ("ui/", "strategy/", "universe/", "builder/", "test/")
                 for key in self.secure_settings.allKeys():
@@ -246,6 +248,16 @@ class MainWindow(QMainWindow):
                 logger.info("[MIGRATE] legacy registry settings -> ini done")
             except Exception as exc:
                 logger.info("[MIGRATE] skipped: %s", exc)
+
+        self.backup = BackupManager(
+            self.data_dir, keep_last=int(self.settings.value("backup/keep_last", 30))
+        )
+        self.last_backup_label_text = ""
+        logger.info(
+            "[PERSIST] data_dir=%s settings_ini=%s",
+            self.data_dir,
+            settings_ini_path(self.data_dir),
+        )
 
         self.history_store = TradeHistoryStore()
         self.current_config = load_config()
@@ -289,7 +301,7 @@ class MainWindow(QMainWindow):
         self._last_real_condition_ts: float | None = None
         self._monitor_last_update: dict[str, str] = {}
         self._monitor_events: list[dict] = []
-        self.monitor_snapshot_path = get_monitor_snapshot_path()
+        self.monitor_snapshot_path = monitor_snapshot_path(self.data_dir)
         self._persist_monitor_timer = QTimer(self)
         self._persist_monitor_timer.setSingleShot(True)
         self._persist_monitor_timer.timeout.connect(self._save_monitor_snapshot)
@@ -323,7 +335,7 @@ class MainWindow(QMainWindow):
         self.scanner_current_universe: list[str] = []
         self.scanner_config = ScannerConfig()
         self.scanner = ScannerEngine(self.selector.score_candidates, config=self.scanner_config)
-        self.opportunity_tracker = MissedOpportunityTracker(get_opportunity_dir())
+        self.opportunity_tracker = MissedOpportunityTracker(self.data_dir / "opportunity")
         self._last_scan_result = None
         self._scanner_next_run_at: Optional[datetime.datetime] = None
         self.last_scanner_attempt_ts: Optional[datetime.datetime] = None
@@ -343,6 +355,13 @@ class MainWindow(QMainWindow):
         self.scan_countdown_timer.timeout.connect(self._update_scan_schedule_ui)
         self.scan_countdown_timer.setInterval(1000)
         self.scan_countdown_timer.start()
+
+        self.backup_enabled = bool(int(self.settings.value("backup/enabled", 1)))
+        self.backup_interval_min = int(self.settings.value("backup/interval_min", 10))
+        self._backup_timer = QTimer(self)
+        self._backup_timer.timeout.connect(self._run_auto_backup)
+        if self.backup_enabled:
+            self._backup_timer.start(self.backup_interval_min * 60 * 1000)
 
         self.close_timer = QTimer(self)
         self.close_timer.timeout.connect(self._on_eod_check)
@@ -787,17 +806,23 @@ class MainWindow(QMainWindow):
         tab_log = QWidget()
         tab_log_layout = QVBoxLayout()
         log_bar = QHBoxLayout()
-        self.data_dir_label = QLabel(f"DATA: {str(self.data_dir)}")
+        self.data_dir_label = QLabel(f"DATA DIR: {self.data_dir}")
+        self.last_backup_label = QLabel("LAST BACKUP: (none)")
         self.open_data_dir_btn = QPushButton("데이터 폴더 열기")
+        self.change_data_dir_btn = QPushButton("데이터 폴더 변경...")
         log_bar.addWidget(self.data_dir_label)
         log_bar.addStretch(1)
+        log_bar.addWidget(self.last_backup_label)
         log_bar.addWidget(self.open_data_dir_btn)
+        log_bar.addWidget(self.change_data_dir_btn)
         tab_log_layout.addLayout(log_bar)
         tab_log_layout.addWidget(self.log_view)
         tab_log.setLayout(tab_log_layout)
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
 
-        report_widget = ReportsWidget(self.history_store, reports_dir=get_reports_dir(), parent=self)
+        report_widget = ReportsWidget(
+            self.history_store, reports_dir=reports_dir(self.data_dir), parent=self
+        )
         self.main_tabs.addTab(wrap_tab(report_widget), "리포트")
 
         main.addWidget(self.main_tabs)
@@ -827,6 +852,7 @@ class MainWindow(QMainWindow):
         self.openapi_login_button.clicked.connect(self._on_openapi_login)
         self.history_button.clicked.connect(self._open_trade_history)
         self.open_data_dir_btn.clicked.connect(self._open_data_dir)
+        self.change_data_dir_btn.clicked.connect(self._change_data_dir)
         self.refresh_conditions_btn.clicked.connect(self._refresh_condition_list)
         self.run_condition_btn.clicked.connect(self._execute_condition)
         self.preview_candidates_btn.clicked.connect(self._preview_candidates)
@@ -2477,6 +2503,13 @@ class MainWindow(QMainWindow):
                 f"- market_open={open_flag} ({reason})",
                 f"- holdings={holdings} / max_positions={self.strategy.max_positions}",
                 f"- cash={self.strategy.cash:,.0f}",
+                "",
+                "[PERSIST]",
+                f"- data_dir={self.data_dir}",
+                f"- settings_ini={settings_ini_path(self.data_dir)}",
+                f"- trade_db={self.history_store.db_path}",
+                f"- last_backup_ts={self.backup.last_backup_ts}",
+                f"- backup_enabled={self.backup_enabled} interval_min={self.backup_interval_min} keep_last={self.backup.keep_last}",
             ]
 
             scan_result = self._last_scan_result
@@ -3109,6 +3142,13 @@ class MainWindow(QMainWindow):
             self.settings.setValue("ui/main_tab_index", self.main_tabs.currentIndex())
         self.settings.setValue("ui/window_geometry", self.saveGeometry())
         self._save_monitor_snapshot()
+        try:
+            out = self.backup.run_backup(reason="exit")
+            if hasattr(self, "last_backup_label"):
+                self.last_backup_label.setText(f"LAST BACKUP: {self.backup.last_backup_ts}")
+            self._log(f"[BACKUP] exit backup saved -> {out}")
+        except Exception as exc:
+            self._log(f"[BACKUP][WARN] exit backup failed: {exc}")
         self.settings.sync()
         super().closeEvent(event)
 
@@ -3124,11 +3164,40 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log(f"[UI][WARN] 데이터 폴더 열기 실패: {exc}")
 
+    def _change_data_dir(self) -> None:
+        try:
+            path = QFileDialog.getExistingDirectory(self, "데이터 폴더 선택", str(self.data_dir))
+            if not path:
+                return
+            self.secure_settings.setValue("storage/data_dir", path)
+            self.secure_settings.sync()
+            QMessageBox.information(
+                self,
+                "완료",
+                "데이터 폴더 경로를 저장했습니다.\n프로그램을 재시작하면 새 폴더에서 자동 복원됩니다.",
+            )
+            self._log(f"[PERSIST] storage/data_dir updated -> {path}")
+        except Exception as exc:
+            self._log(f"[UI][WARN] 데이터 폴더 변경 실패: {exc}")
+
+    def _run_auto_backup(self) -> None:
+        try:
+            out = self.backup.run_backup(reason="timer")
+            if hasattr(self, "last_backup_label"):
+                self.last_backup_label.setText(f"LAST BACKUP: {self.backup.last_backup_ts}")
+            self._log(f"[BACKUP] timer backup saved -> {out}")
+        except Exception as exc:
+            self._log(f"[BACKUP][WARN] timer backup failed: {exc}")
+
 
 def main(argv: Optional[List[str]] = None) -> None:
     """Entry point for manual GUI testing."""
 
-    configure_logging()
+    secure = QSettings("Mystock02", "AutoTrader")
+    user_dir = secure.value("storage/data_dir", "")
+    data_dir = resolve_data_dir(user_dir)
+    ensure_data_dirs(data_dir)
+    configure_logging(log_dir=(data_dir / "logs"))
     app = QApplication(argv or [])
     window = MainWindow()
     window.show()

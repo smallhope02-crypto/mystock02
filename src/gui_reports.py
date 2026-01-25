@@ -286,10 +286,10 @@ class ReportsWidget(QWidget):
                 ],
             }
             from .persistence import save_json
-            from .app_paths import get_reports_last_path
+            from .app_paths import reports_last_path
 
             save_json(snap_path, payload)
-            save_json(get_reports_last_path(), payload)
+            save_json(reports_last_path(self.reports_dir.parent), payload)
             self.status_label.setText(self.status_label.text() + " / 스냅샷 저장됨")
         except Exception as exc:
             try:

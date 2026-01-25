@@ -15,12 +15,17 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.app_paths import ensure_data_dirs, get_logs_dir
+from PyQt5.QtCore import QSettings
+
+from src.app_paths import ensure_data_dirs, resolve_data_dir
 from src.logging_setup import configure_logging
 from src.gui_main import main
 
 
 if __name__ == "__main__":
-    ensure_data_dirs()
-    configure_logging(get_logs_dir())
+    secure = QSettings("Mystock02", "AutoTrader")
+    user_dir = secure.value("storage/data_dir", "")
+    data_dir = resolve_data_dir(user_dir)
+    ensure_data_dirs(data_dir)
+    configure_logging(log_dir=(data_dir / "logs"))
     main()

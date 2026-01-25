@@ -9,7 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .app_paths import get_trade_db_path
+try:
+    from PyQt5.QtCore import QSettings  # type: ignore
+except Exception:  # pragma: no cover - fallback when Qt is unavailable
+    QSettings = None  # type: ignore
+
+from .app_paths import ensure_data_dirs, resolve_data_dir, trade_db_path
 
 @dataclass
 class TradeEvent:
@@ -37,7 +42,18 @@ class TradeHistoryStore:
     """Persist trade events into a local SQLite DB."""
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
-        self.db_path = db_path or get_trade_db_path()
+        if db_path is None:
+            user_dir = ""
+            if QSettings is not None:
+                try:
+                    secure = QSettings("Mystock02", "AutoTrader")
+                    user_dir = secure.value("storage/data_dir", "")
+                except Exception:
+                    user_dir = ""
+            data_dir = resolve_data_dir(user_dir)
+            ensure_data_dirs(data_dir)
+            db_path = trade_db_path(data_dir)
+        self.db_path = db_path
         self._ensure_parent()
         self.init_db()
 

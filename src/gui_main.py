@@ -318,6 +318,7 @@ class MainWindow(QMainWindow):
         self.auto_trading_active: bool = False
         self.auto_trading_armed: bool = False
         self.trading_orders_enabled: bool = False
+        self._auto_condition_bootstrap_done: bool = False
         self._name_cache: dict[str, str] = {}
         self._price_cache: dict[str, float] = {}
         self._last_price_refresh_reason: str = ""
@@ -347,6 +348,9 @@ class MainWindow(QMainWindow):
         self.last_scanner_trigger: str = ""
         self.last_scanner_source: str = ""
         self.last_scanner_tr_meta: dict = {}
+        self._last_realreg_set: set[str] = set()
+        self._last_realreg_ts: float = 0.0
+        self.realreg_limit = 100
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -495,6 +499,11 @@ class MainWindow(QMainWindow):
         self.gate_after_trigger_checkbox.setChecked(False)
         self.allow_premarket_monitor_checkbox = QCheckBox("장전 감시 허용(주문은 장중)")
         self.allow_premarket_monitor_checkbox.setChecked(True)
+        self.auto_run_condition_on_start_checkbox = QCheckBox("자동매매 시작 시 조건 자동실행(SendCondition)")
+        self.auto_run_condition_on_start_checkbox.setChecked(True)
+        self.auto_run_condition_on_start_checkbox.setToolTip(
+            "조건 조인/조건모드 사용 시 자동매매 시작만 눌러도 조건 실행을 자동 시도합니다. 실패 시 로그로 원인 확인 가능"
+        )
 
         left_panel = QVBoxLayout()
         mode_row = QHBoxLayout()
@@ -517,6 +526,7 @@ class MainWindow(QMainWindow):
         gate_layout.addRow("오늘누적 후보", self.today_candidate_list)
         gate_layout.addRow(self.gate_after_trigger_checkbox)
         gate_layout.addRow(self.allow_premarket_monitor_checkbox)
+        gate_layout.addRow(self.auto_run_condition_on_start_checkbox)
         left_panel.addLayout(gate_layout)
 
         self.test_group = QGroupBox("테스트 유니버스")
@@ -919,6 +929,7 @@ class MainWindow(QMainWindow):
         self.today_candidate_list.itemChanged.connect(lambda *_: self._save_current_settings())
         self.gate_after_trigger_checkbox.toggled.connect(self._save_current_settings)
         self.allow_premarket_monitor_checkbox.toggled.connect(self._save_current_settings)
+        self.auto_run_condition_on_start_checkbox.toggled.connect(self._save_current_settings)
         self.rebuy_after_sell_checkbox.toggled.connect(self._on_buy_limit_changed)
         self.max_buy_per_symbol_spin.valueChanged.connect(self._on_buy_limit_changed)
         self.builder_strip.itemDoubleClicked.connect(self._toggle_operator_token)
@@ -1107,6 +1118,7 @@ class MainWindow(QMainWindow):
         today_candidates = [x for x in str(today_raw).split(",") if x]
         gate = self.settings.value(prefix + "gate_after_trigger", False, type=bool)
         premarket = self.settings.value(prefix + "allow_premarket", True, type=bool)
+        auto_run = self.settings.value(prefix + "auto_run_condition_on_start", True, type=bool)
         rebuy = self.settings.value(prefix + "rebuy_after_sell", False, type=bool)
         max_buy = self.settings.value(prefix + "max_buy_per_symbol_today", 1)
         try:
@@ -1115,6 +1127,7 @@ class MainWindow(QMainWindow):
             max_buy = 1
         self.gate_after_trigger_checkbox.setChecked(bool(gate))
         self.allow_premarket_monitor_checkbox.setChecked(bool(premarket))
+        self.auto_run_condition_on_start_checkbox.setChecked(bool(auto_run))
         self.rebuy_after_sell_checkbox.setChecked(bool(rebuy))
         self.max_buy_per_symbol_spin.setValue(max_buy)
         self._restore_condition_choices(trigger, today_candidates)
@@ -1147,6 +1160,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue(uni_prefix + "today_candidates", ",".join([s for s in selected_today if s]))
         self.settings.setValue(uni_prefix + "gate_after_trigger", self.gate_after_trigger_checkbox.isChecked())
         self.settings.setValue(uni_prefix + "allow_premarket", self.allow_premarket_monitor_checkbox.isChecked())
+        self.settings.setValue(
+            uni_prefix + "auto_run_condition_on_start",
+            self.auto_run_condition_on_start_checkbox.isChecked(),
+        )
         self.settings.setValue(uni_prefix + "rebuy_after_sell", self.rebuy_after_sell_checkbox.isChecked())
         self.settings.setValue(uni_prefix + "max_buy_per_symbol_today", self.max_buy_per_symbol_spin.value())
         self.settings.setValue("test/universe", ",".join(sorted(self.test_universe)))
@@ -1455,17 +1472,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str, str, int, str)
     def _on_tr_condition_received(self, screen_no: str, code_list: str, condition_name: str, index: int, next_: str) -> None:
         codes = [code for code in str(code_list).split(";") if code]
-        name_key = condition_name
-        if condition_name not in self.condition_manager.condition_sets_rt:
-            alt = condition_name.strip()
-            active = list(self.condition_manager.condition_sets_rt.keys())
-            if alt != condition_name and alt in self.condition_manager.condition_sets_rt:
-                self._log(f"[조건] condition_name normalize: '{condition_name}' -> '{alt}'")
-                name_key = alt
-            else:
-                self._log(
-                    f"[조건][WARN] 수신된 조건({condition_name})이 활성 목록에 없습니다. active={active}"
-                )
+        name_key = self._canonical_condition_name(condition_name, index)
         self.condition_manager.update_condition(name_key, codes)
         label = self._condition_id_text(name_key)
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1486,14 +1493,9 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str, str, str)
     def _on_real_condition_received(self, code: str, event: str, condition_name: str, condition_index: str) -> None:
-        name_key = condition_name
-        if condition_name not in self.condition_manager.condition_sets_rt:
-            alt = condition_name.strip()
-            if alt in self.condition_manager.condition_sets_rt:
-                self._log(f"[조건] condition_name normalize: '{condition_name}' -> '{alt}' (real)")
-                name_key = alt
-            else:
-                return
+        name_key = self._canonical_condition_name(condition_name, condition_index)
+        if not name_key:
+            return
         self.condition_manager.apply_event(name_key, code, event)
         action = "편입" if event == "I" else "편출" if event == "D" else f"기타({event})"
         label = self._condition_id_text(name_key)
@@ -1510,9 +1512,7 @@ class MainWindow(QMainWindow):
     def _recompute_universe(self) -> None:
         final_set = self._evaluate_universe(log_prefix="EVAL")
         self.engine.set_external_universe(list(final_set))
-        openapi = getattr(self.kiwoom_client, "openapi", None)
-        if openapi:
-            openapi.set_real_reg(list(final_set))
+        self._update_realtime_reg(reason="condition_recompute", universe_codes=final_set)
 
     def _schedule_universe_refresh(self) -> None:
         if self._universe_refresh_scheduled:
@@ -1528,9 +1528,7 @@ class MainWindow(QMainWindow):
     def _refresh_universe_from_conditions(self) -> None:
         final_set = self._evaluate_universe(log_prefix="EVAL")
         self.engine.set_external_universe(list(final_set))
-        openapi = getattr(self.kiwoom_client, "openapi", None)
-        if openapi:
-            openapi.set_real_reg(list(final_set))
+        self._update_realtime_reg(reason="condition_refresh", universe_codes=final_set)
         self._refresh_monitor_results()
 
     @pyqtSlot(list)
@@ -1561,6 +1559,8 @@ class MainWindow(QMainWindow):
     def _on_holdings_received(self, holdings: list) -> None:
         self.real_holdings = holdings
         self._log(f"[실거래] 보유종목 수신: {len(holdings)}건")
+        universe_codes, _ = self._current_universe()
+        self._update_realtime_reg(reason="holdings_received", universe_codes=set(universe_codes))
         self._refresh_positions(market_open=self._is_market_open())
 
     @pyqtSlot(str)
@@ -1630,6 +1630,24 @@ class MainWindow(QMainWindow):
         if name in self.condition_map:
             idx, _ = self.condition_map[name]
             return str(idx)
+        return name
+
+    def _canonical_condition_name(self, raw_name: str, idx_any) -> str:
+        name = str(raw_name or "").strip()
+        if name in self.condition_manager.condition_sets_rt:
+            return name
+        try:
+            idx = int(idx_any)
+        except Exception:
+            idx = None
+        if idx is not None:
+            for cond_idx, cond_name in getattr(self, "all_conditions", []) or []:
+                if int(cond_idx) == idx:
+                    mapped = str(cond_name).strip()
+                    if mapped in self.condition_manager.condition_sets_rt:
+                        self._log(f"[조건] condition_index map idx={idx} '{raw_name}' -> '{mapped}'")
+                        return mapped
+                    return mapped
         return name
 
     def _active_condition_names(self) -> list[str]:
@@ -1805,6 +1823,7 @@ class MainWindow(QMainWindow):
             self.builder_strip.addItem(item)
         self.builder_strip.blockSignals(False)
         self._update_group_preview()
+        self._auto_condition_bootstrap_done = False
 
     def _clear_builder(self) -> None:
         self.builder_tokens = []
@@ -2224,6 +2243,32 @@ class MainWindow(QMainWindow):
                     "[조건][WARN] 조건 결과를 아직 수신하지 못했습니다. '조건 실행(실시간 포함)'을 눌러 SendCondition 실행 후 [COND_EVT] 로그가 나오는지 확인하세요."
                 )
                 self._warned_no_cond_event = True
+
+        # --- AUTOBOOT: condition auto-run on start ---
+        try:
+            active_conditions = [t.get("value") for t in self.builder_tokens if t.get("type") == "COND"]
+            need_conditions = False
+            if active_conditions:
+                if self.universe_mode == "condition":
+                    need_conditions = True
+                elif self.universe_mode == "scanner":
+                    try:
+                        if getattr(self, "scanner_config", None) and self.scanner_config.candidate_source == "condition":
+                            need_conditions = True
+                    except Exception:
+                        need_conditions = False
+
+            if (
+                need_conditions
+                and self.auto_run_condition_on_start_checkbox.isChecked()
+                and not getattr(self, "_auto_condition_bootstrap_done", False)
+            ):
+                self._log(f"[조건][AUTOBOOT] start active={len(active_conditions)} universe_mode={self.universe_mode}")
+                self._auto_condition_bootstrap_done = True
+                self._execute_condition()
+                self._log("[조건][AUTOBOOT] end (execute_condition dispatched)")
+        except Exception as exc:
+            self._log(f"[조건][AUTOBOOT][ERR] {exc}")
         self.auto_trading_active = True
         if open_flag:
             self.auto_trading_armed = False
@@ -2264,6 +2309,7 @@ class MainWindow(QMainWindow):
         self.auto_trading_active = False
         self.auto_trading_armed = False
         self.trading_orders_enabled = False
+        self._auto_condition_bootstrap_done = False
 
     def _on_cycle(self) -> None:
         if self._engine_busy:
@@ -2439,6 +2485,9 @@ class MainWindow(QMainWindow):
             self._last_scan_result = scan_result
             self.scanner_current_universe = scan_result.applied_universe
             self.engine.set_external_universe(scan_result.applied_universe)
+            self._update_realtime_reg(
+                reason=f"scanner_{trigger}", universe_codes=set(self.scanner_current_universe)
+            )
             self.last_scanner_ok_ts = datetime.datetime.now()
 
             self._log(
@@ -2721,6 +2770,66 @@ class MainWindow(QMainWindow):
             return set(self.scanner_current_universe), "scanner"
         return set(self.condition_universe), "condition"
 
+    def _update_realtime_reg(self, reason: str = "", universe_codes: set[str] | None = None) -> None:
+        openapi = getattr(self.kiwoom_client, "openapi", None)
+        if not openapi or not getattr(openapi, "connected", False):
+            return
+
+        priority: list[str] = []
+        try:
+            for holding in getattr(self, "real_holdings", []) or []:
+                code = str(holding.get("code", "") or "").strip()
+                if code:
+                    priority.append(code)
+        except Exception:
+            pass
+        try:
+            positions = getattr(self.strategy, "positions", {})
+            if isinstance(positions, dict):
+                iterable = positions.values()
+            else:
+                iterable = positions
+            for pos in iterable:
+                code = str(getattr(pos, "symbol", "") or "").strip()
+                if code:
+                    priority.append(code)
+        except Exception:
+            pass
+
+        uni = set(universe_codes or set())
+        limit = int(getattr(self, "realreg_limit", 100))
+        merged: list[str] = []
+        seen: set[str] = set()
+        for code in priority:
+            if code not in seen:
+                merged.append(code)
+                seen.add(code)
+            if len(merged) >= limit:
+                break
+        if len(merged) < limit:
+            for code in sorted(uni):
+                if code not in seen:
+                    merged.append(code)
+                    seen.add(code)
+                if len(merged) >= limit:
+                    break
+
+        new_set = set(merged)
+        if new_set == getattr(self, "_last_realreg_set", set()):
+            return
+
+        now = time.time()
+        if now - float(getattr(self, "_last_realreg_ts", 0.0)) < 0.5:
+            return
+
+        self._last_realreg_set = new_set
+        self._last_realreg_ts = now
+        openapi.set_real_reg(merged)
+        self._log(
+            f"[REALREG] update reason={reason} count={len(merged)} "
+            f"priority={len(set(priority))} universe={len(uni)}"
+        )
+
     def _is_market_open(self) -> bool:
         open_flag, _, _ = self._market_state()
         return open_flag
@@ -2989,7 +3098,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_monitor_results(self) -> None:
         selected_name = self.monitor_condition_combo.currentData()
-        if not selected_name:
+        if selected_name == "__JOINED__":
+            codes = set(self.condition_universe or set())
+            label = "조인결과"
+        elif not selected_name:
             names = list(self.condition_manager.condition_sets_rt.keys())
             codes = set()
             for name in names:
@@ -3010,9 +3122,14 @@ class MainWindow(QMainWindow):
         self.monitor_result_table.resizeColumnsToContents()
         last_event = self._monitor_events[-1]["ts"] if self._monitor_events else "-"
         guidance = " (조건 실행 전이거나 이벤트 미수신)"
-        self.monitor_status_label.setText(
-            f"마지막 수신: {last_event} / {label} 결과: {len(codes)}건{guidance if len(codes) == 0 else ''}"
-        )
+        if selected_name == "__JOINED__":
+            self.monitor_status_label.setText(
+                f"마지막 수신: {last_event} / 조인결과: {len(codes)}건 (현재 빌더 기준){guidance if len(codes) == 0 else ''}"
+            )
+        else:
+            self.monitor_status_label.setText(
+                f"마지막 수신: {last_event} / {label} 결과: {len(codes)}건{guidance if len(codes) == 0 else ''}"
+            )
 
     def _refresh_monitor_events(self) -> None:
         rows = self._monitor_events
@@ -3079,9 +3196,8 @@ class MainWindow(QMainWindow):
         price_refresh_reason = ""
 
         if use_real_holdings:
-            openapi = getattr(self.kiwoom_client, "openapi", None)
-            if openapi:
-                openapi.set_real_reg([h.get("code", "") for h in self.real_holdings if h.get("code")])
+            universe_codes, _ = self._current_universe()
+            self._update_realtime_reg(reason="positions_refresh", universe_codes=set(universe_codes))
             for row, h in enumerate(self.real_holdings):
                 code = h.get("code", "").strip()
                 name = h.get("name", "") or self._get_symbol_name(code)
@@ -3168,6 +3284,7 @@ class MainWindow(QMainWindow):
         self.monitor_condition_combo.blockSignals(True)
         self.monitor_condition_combo.clear()
         self.monitor_condition_combo.addItem("전체", "")
+        self.monitor_condition_combo.addItem("조인결과(최종 유니버스)", "__JOINED__")
         self.condition_map.clear()
         self.all_conditions = [(int(idx), name) for idx, name in conditions]
         for idx, name in self.all_conditions:

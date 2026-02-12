@@ -660,6 +660,8 @@ class MainWindow(QMainWindow):
         monitor_controls = QHBoxLayout()
         self.monitor_condition_combo = QComboBox()
         self.monitor_condition_combo.addItem("전체", "")
+        self.monitor_condition_combo.addItem("조인결과(최종 유니버스)", "__JOINED__")
+        self.monitor_condition_combo.setCurrentIndex(1)
         self.monitor_refresh_btn = QPushButton("현재결과 새로고침")
         self.monitor_reset_btn = QPushButton("이벤트 초기화")
         self.monitor_export_btn = QPushButton("CSV 내보내기")
@@ -3099,7 +3101,11 @@ class MainWindow(QMainWindow):
     def _refresh_monitor_results(self) -> None:
         selected_name = self.monitor_condition_combo.currentData()
         if selected_name == "__JOINED__":
-            codes = set(self.condition_universe or set())
+            try:
+                codes = set(self._evaluate_universe(log_prefix="MONITOR_JOIN") or set())
+            except Exception as exc:
+                self._log(f"[MONITOR][JOINED][ERR] {exc}")
+                codes = set(self.condition_universe or set())
             label = "조인결과"
         elif not selected_name:
             names = list(self.condition_manager.condition_sets_rt.keys())
@@ -3281,6 +3287,7 @@ class MainWindow(QMainWindow):
         self.trigger_combo.clear()
         self.trigger_combo.addItem("(사용 안 함)", "")
         self.today_candidate_list.clear()
+        selected_monitor = self.monitor_condition_combo.currentData()
         self.monitor_condition_combo.blockSignals(True)
         self.monitor_condition_combo.clear()
         self.monitor_condition_combo.addItem("전체", "")
@@ -3299,6 +3306,12 @@ class MainWindow(QMainWindow):
             cand_item.setCheckState(Qt.Unchecked)
             self.today_candidate_list.addItem(cand_item)
             self.monitor_condition_combo.addItem(f"{idx}: {name}", name)
+        restore_idx = self.monitor_condition_combo.findData(selected_monitor)
+        if restore_idx >= 0:
+            self.monitor_condition_combo.setCurrentIndex(restore_idx)
+        else:
+            joined_idx = self.monitor_condition_combo.findData("__JOINED__")
+            self.monitor_condition_combo.setCurrentIndex(joined_idx if joined_idx >= 0 else 0)
         self.monitor_condition_combo.blockSignals(False)
 
         if not self._pending_trigger_name:

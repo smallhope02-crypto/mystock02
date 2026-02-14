@@ -46,7 +46,7 @@ class TradeHistoryDialog(QDialog):
         self.name_resolver = name_resolver
         self.data_dir = Path(data_dir) if data_dir else None
         self.setWindowTitle("매수/매도 이력 조회")
-        self.resize(1180, 620)
+        self.resize(1120, 560)
 
         root = QVBoxLayout()
         form = QFormLayout()
@@ -90,12 +90,8 @@ class TradeHistoryDialog(QDialog):
         button_row.addWidget(self.export_button)
         button_row.addStretch(1)
         button_row.addWidget(self.summary_label)
-        root.addLayout(button_row)
+        layout.addLayout(button_row)
 
-        self.tabs = QTabWidget()
-
-        event_tab = QWidget()
-        event_layout = QVBoxLayout(event_tab)
         self.table = QTableWidget(0, 14)
         self.table.setHorizontalHeaderLabels(
             [
@@ -209,6 +205,7 @@ class TradeHistoryDialog(QDialog):
 
         if row.get("event_type") == "paper_fill":
             return True
+
         if gubun == "1":
             return include_balance and (not only_fills or status == "체결")
         if only_fills:
@@ -272,14 +269,14 @@ class TradeHistoryDialog(QDialog):
         total_pct = (total_pnl / total_cost * 100.0) if total_cost > 0 else 0.0
         return per_row, total_pnl, total_pct
 
-    def _set_pnl_item(self, table: QTableWidget, row_idx: int, col: int, text: str, value: float) -> None:
+    def _set_pnl_item(self, row_idx: int, col: int, text: str, value: float) -> None:
         item = QTableWidgetItem(text)
         if value > 0:
             item.setForeground(QColor("red"))
         elif value < 0:
             item.setForeground(QColor("blue"))
         item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        table.setItem(row_idx, col, item)
+        self.table.setItem(row_idx, col, item)
 
     def _load_rows(self) -> None:
         start = self.start_date.date().toString("yyyy-MM-dd") + " 00:00:00"
@@ -294,7 +291,7 @@ class TradeHistoryDialog(QDialog):
         for row_idx, row in enumerate(rows):
             row_id = int(row.get("id") or 0)
             code_val = str(row.get("code", "") or "")
-            name_val = self._resolve_name(code_val, str(row.get("name", "") or ""))
+            name_val = str(row.get("name", "") or "")
             self.table.setItem(row_idx, 0, QTableWidgetItem(str(row.get("created_at", ""))))
             self.table.setItem(row_idx, 1, QTableWidgetItem(str(row.get("mode", ""))))
             self.table.setItem(row_idx, 2, QTableWidgetItem(self._format_gubun(row)))
@@ -307,13 +304,18 @@ class TradeHistoryDialog(QDialog):
             self.table.setItem(row_idx, 9, QTableWidgetItem(str(row.get("exec_qty", ""))))
             pnl = row_pnl_map.get(row_id)
             if pnl:
-                self._set_pnl_item(self.table, row_idx, 10, f"{pnl[0]:,}", pnl[0])
-                self._set_pnl_item(self.table, row_idx, 11, f"{pnl[1]:.2f}", pnl[1])
+                self._set_pnl_item(row_idx, 10, f"{pnl[0]:,}", pnl[0])
+                self._set_pnl_item(row_idx, 11, f"{pnl[1]:.2f}", pnl[1])
             else:
                 self.table.setItem(row_idx, 10, QTableWidgetItem(""))
                 self.table.setItem(row_idx, 11, QTableWidgetItem(""))
             self.table.setItem(row_idx, 12, QTableWidgetItem(str(row.get("order_no", ""))))
             self.table.setItem(row_idx, 13, QTableWidgetItem(str(row.get("exec_no", ""))))
+
+        self.summary_label.setText(f"순손익: {total_pnl:,} / {total_pct:.2f}%")
+        self.summary_label.setStyleSheet(
+            "color: red;" if total_pnl > 0 else "color: blue;" if total_pnl < 0 else ""
+        )
         self.table.resizeColumnsToContents()
 
         self.summary_label.setText(f"순손익: {total_pnl:,} / {total_pct:.2f}%")
@@ -445,11 +447,13 @@ class TradeHistoryDialog(QDialog):
                 bucket["created_at_first"] = created_at
             if created_at and created_at > bucket["created_at_last"]:
                 bucket["created_at_last"] = created_at
-            bucket["fill_count"] += int(exec_qty > 0)
+            bucket["fill_count"] += 1
             bucket["total_qty"] += int(exec_qty)
             bucket["_notional"] += int(exec_price) * int(exec_qty)
             bucket["fee_sum"] += int(fee)
             bucket["tax_sum"] += int(tax)
+            if name and not bucket["name"]:
+                bucket["name"] = name
 
         result = []
         for bucket in grouped.values():

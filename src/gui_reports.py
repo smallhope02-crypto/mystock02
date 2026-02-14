@@ -156,17 +156,6 @@ class ReportsWidget(QWidget):
         self.export_symbol_btn.clicked.connect(self._export_symbol_csv)
         self.export_daily_btn.clicked.connect(self._export_daily_csv)
 
-    def _resolve_name(self, code: str, name: str | None) -> str:
-        text = str(name or "").strip()
-        if text:
-            return text
-        try:
-            if self.name_resolver and code:
-                return str(self.name_resolver(code) or "").strip()
-        except Exception:
-            return ""
-        return ""
-
     def _set_signed_item(self, table: QTableWidget, row: int, col: int, value: float, fmt: str = "{:.2f}") -> None:
         text = fmt.format(value)
         item = QTableWidgetItem(text)

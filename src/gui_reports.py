@@ -35,7 +35,11 @@ from .trade_history_store import TradeHistoryStore
 
 class ReportsWidget(QWidget):
     def __init__(
-        self, store: TradeHistoryStore, reports_dir: Path | str, parent: Optional[QWidget] = None
+        self,
+        store: TradeHistoryStore,
+        reports_dir: Path | str,
+        parent: Optional[QWidget] = None,
+        name_resolver=None,
     ) -> None:
         super().__init__(parent)
         self.store = store
@@ -44,6 +48,7 @@ class ReportsWidget(QWidget):
         self._last_units = []
         self._last_symbol_perf = []
         self._last_daily = None
+        self.name_resolver = name_resolver
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -205,7 +210,7 @@ class ReportsWidget(QWidget):
         self.symbol_table.setRowCount(len(symbol_perf))
         for row_idx, perf in enumerate(symbol_perf):
             self.symbol_table.setItem(row_idx, 0, QTableWidgetItem(perf.code))
-            self.symbol_table.setItem(row_idx, 1, QTableWidgetItem(perf.name or ""))
+            self.symbol_table.setItem(row_idx, 1, QTableWidgetItem(self._resolve_name(perf.code, perf.name)))
             self.symbol_table.setItem(row_idx, 2, QTableWidgetItem(str(perf.trades)))
             self.symbol_table.setItem(row_idx, 3, QTableWidgetItem(str(perf.wins)))
             self.symbol_table.setItem(row_idx, 4, QTableWidgetItem(str(perf.losses)))
@@ -296,7 +301,7 @@ class ReportsWidget(QWidget):
                 "symbol_perf_top": [
                     {
                         "code": p.code,
-                        "name": p.name,
+                        "name": self._resolve_name(p.code, p.name),
                         "trades": p.trades,
                         "wins": p.wins,
                         "losses": p.losses,
@@ -323,7 +328,7 @@ class ReportsWidget(QWidget):
         table.setRowCount(len(rows))
         for idx, perf in enumerate(rows):
             table.setItem(idx, 0, QTableWidgetItem(perf.code))
-            table.setItem(idx, 1, QTableWidgetItem(perf.name or ""))
+            table.setItem(idx, 1, QTableWidgetItem(self._resolve_name(perf.code, perf.name)))
             table.setItem(idx, 2, QTableWidgetItem(str(perf.trades)))
             table.setItem(idx, 3, QTableWidgetItem(f"{perf.win_rate:.2f}"))
             self._set_signed_item(table, idx, 4, float(perf.net_pnl_sum), "{:+,.0f}")
@@ -345,7 +350,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공": perf.wins,
                     "실패": perf.losses,
@@ -407,7 +412,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공률": round(perf.win_rate, 2),
                     "실현손익(세후)": perf.net_pnl_sum,
@@ -419,7 +424,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공률": round(perf.win_rate, 2),
                     "실현손익(세후)": perf.net_pnl_sum,

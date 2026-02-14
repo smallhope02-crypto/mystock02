@@ -20,24 +20,35 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
+from .performance_analyzer import build_closed_lots, load_fills
 from .trade_history_store import TradeHistoryStore
 
 
 class TradeHistoryDialog(QDialog):
     """Dialog to browse and export trade history."""
 
-    def __init__(self, store: TradeHistoryStore, parent: Optional[QDialog] = None) -> None:
+    def __init__(
+        self,
+        store: TradeHistoryStore,
+        parent: Optional[QDialog] = None,
+        name_resolver=None,
+        data_dir: Path | str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.store = store
+        self.name_resolver = name_resolver
+        self.data_dir = Path(data_dir) if data_dir else None
         self.setWindowTitle("매수/매도 이력 조회")
         self.resize(1120, 560)
 
-        layout = QVBoxLayout()
+        root = QVBoxLayout()
         form = QFormLayout()
         self.start_date = QDateEdit()
         self.end_date = QDateEdit()
@@ -57,7 +68,7 @@ class TradeHistoryDialog(QDialog):
         form.addRow("종료일", self.end_date)
         form.addRow("모드", self.mode_combo)
         form.addRow("종목코드", self.code_input)
-        layout.addLayout(form)
+        root.addLayout(form)
 
         filter_row = QHBoxLayout()
         self.only_fills_checkbox = QCheckBox("체결만 보기")
@@ -69,7 +80,7 @@ class TradeHistoryDialog(QDialog):
         filter_row.addWidget(self.only_fills_checkbox)
         filter_row.addWidget(self.include_receipt_checkbox)
         filter_row.addWidget(self.include_balance_checkbox)
-        layout.addLayout(filter_row)
+        root.addLayout(filter_row)
 
         button_row = QHBoxLayout()
         self.search_button = QPushButton("조회")
@@ -101,9 +112,37 @@ class TradeHistoryDialog(QDialog):
             ]
         )
         self.table.setSortingEnabled(True)
-        layout.addWidget(self.table)
+        event_layout.addWidget(self.table)
+        self.tabs.addTab(event_tab, "체결 로그")
 
-        self.setLayout(layout)
+        pnl_tab = QWidget()
+        pnl_layout = QVBoxLayout(pnl_tab)
+        self.pnl_table = QTableWidget(0, 9)
+        self.pnl_table.setHorizontalHeaderLabels(
+            [
+                "종목코드",
+                "종목명",
+                "진입시각",
+                "청산시각",
+                "수량",
+                "진입가",
+                "청산가",
+                "순손익(원)",
+                "수익률(%)",
+            ]
+        )
+        pnl_layout.addWidget(self.pnl_table)
+        self.tabs.addTab(pnl_tab, "거래 요약(손익)")
+
+        no_buy_tab = QWidget()
+        no_buy_layout = QVBoxLayout(no_buy_tab)
+        self.no_buy_table = QTableWidget(0, 5)
+        self.no_buy_table.setHorizontalHeaderLabels(["시각", "컨텍스트", "종목", "사유", "상세"])
+        no_buy_layout.addWidget(self.no_buy_table)
+        self.tabs.addTab(no_buy_tab, "미매수 사유")
+
+        root.addWidget(self.tabs)
+        self.setLayout(root)
 
         self.search_button.clicked.connect(self._load_rows)
         self.export_button.clicked.connect(self._export_csv)
@@ -112,6 +151,17 @@ class TradeHistoryDialog(QDialog):
         self.include_balance_checkbox.toggled.connect(self._load_rows)
 
         self._load_rows()
+
+    def _resolve_name(self, code: str, name: str | None) -> str:
+        text = str(name or "").strip()
+        if text:
+            return text
+        try:
+            if self.name_resolver and code:
+                return str(self.name_resolver(code) or "").strip()
+        except Exception:
+            return ""
+        return ""
 
     @staticmethod
     def _format_side(row: dict) -> str:
@@ -158,7 +208,6 @@ class TradeHistoryDialog(QDialog):
 
         if gubun == "1":
             return include_balance and (not only_fills or status == "체결")
-
         if only_fills:
             if status == "체결":
                 return True
@@ -269,6 +318,58 @@ class TradeHistoryDialog(QDialog):
         )
         self.table.resizeColumnsToContents()
 
+        self.summary_label.setText(f"순손익: {total_pnl:,} / {total_pct:.2f}%")
+        self.summary_label.setStyleSheet("color: red;" if total_pnl > 0 else "color: blue;" if total_pnl < 0 else "")
+
+        self._refresh_pnl_summary(start, end, mode)
+        self._refresh_no_buy_tab()
+
+    def _refresh_pnl_summary(self, start: str, end: str, mode: str) -> None:
+        start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
+        fills = load_fills(self.store, start_dt, end_dt, mode_filter=mode)
+        lots = build_closed_lots(fills)
+        self.pnl_table.setRowCount(len(lots))
+        for idx, lot in enumerate(lots):
+            name = self._resolve_name(lot.code, lot.name)
+            self.pnl_table.setItem(idx, 0, QTableWidgetItem(lot.code))
+            self.pnl_table.setItem(idx, 1, QTableWidgetItem(name))
+            self.pnl_table.setItem(idx, 2, QTableWidgetItem(lot.entry_ts.strftime("%Y-%m-%d %H:%M:%S")))
+            self.pnl_table.setItem(idx, 3, QTableWidgetItem(lot.exit_ts.strftime("%Y-%m-%d %H:%M:%S")))
+            self.pnl_table.setItem(idx, 4, QTableWidgetItem(str(lot.qty)))
+            self.pnl_table.setItem(idx, 5, QTableWidgetItem(str(lot.entry_price)))
+            self.pnl_table.setItem(idx, 6, QTableWidgetItem(str(lot.exit_price)))
+            ret = (lot.net_pnl / (lot.entry_price * lot.qty) * 100.0) if lot.entry_price and lot.qty else 0.0
+            self._set_pnl_item(self.pnl_table, idx, 7, f"{lot.net_pnl:,}", lot.net_pnl)
+            self._set_pnl_item(self.pnl_table, idx, 8, f"{ret:.2f}", ret)
+        self.pnl_table.resizeColumnsToContents()
+
+    def _refresh_no_buy_tab(self) -> None:
+        if not self.data_dir:
+            self.no_buy_table.setRowCount(0)
+            return
+        path = self.data_dir / "opportunity" / "buy_decisions.csv"
+        if not path.exists():
+            self.no_buy_table.setRowCount(1)
+            self.no_buy_table.setItem(0, 0, QTableWidgetItem("파일 없음"))
+            self.no_buy_table.setItem(0, 4, QTableWidgetItem(str(path)))
+            return
+        import csv
+
+        rows = []
+        with path.open("r", newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rows.append(row)
+        rows = rows[-300:]
+        self.no_buy_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self.no_buy_table.setItem(i, 0, QTableWidgetItem(str(row.get("ts", ""))))
+            self.no_buy_table.setItem(i, 1, QTableWidgetItem(str(row.get("context", ""))))
+            self.no_buy_table.setItem(i, 2, QTableWidgetItem(str(row.get("symbol", ""))))
+            self.no_buy_table.setItem(i, 3, QTableWidgetItem(str(row.get("reason", ""))))
+            self.no_buy_table.setItem(i, 4, QTableWidgetItem(str(row.get("detail", ""))))
+        self.no_buy_table.resizeColumnsToContents()
+
     def _select_export_mode(self) -> str | None:
         dialog = QMessageBox(self)
         dialog.setWindowTitle("CSV 저장")
@@ -323,7 +424,7 @@ class TradeHistoryDialog(QDialog):
             fee = row.get("fee") or 0
             tax = row.get("tax") or 0
             created_at = row.get("created_at") or ""
-            name = row.get("name") or ""
+            name = self._resolve_name(str(code or ""), row.get("name") or "")
             bucket = grouped.setdefault(
                 key,
                 {

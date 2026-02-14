@@ -77,6 +77,7 @@ from .logging_setup import configure_logging
 from .backup_manager import BackupManager
 from .gui_restore_wizard import RestoreWizard
 from .gui_reports import ReportsWidget
+from .buy_decision_logger import BuyDecisionLogger
 from .persistence import load_json, save_json
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,11 @@ class MainWindow(QMainWindow):
         else:
             print("[GUI] QAxContainer 가 없어 OpenAPI 위젯을 생성하지 않습니다.")
         self.selector = UniverseSelector(kiwoom_client=self.kiwoom_client)
-        paper_broker = PaperBroker(initial_cash=self.strategy.initial_cash, history_store=self.history_store)
+        paper_broker = PaperBroker(
+            initial_cash=self.strategy.initial_cash,
+            history_store=self.history_store,
+            name_resolver=self._get_symbol_name,
+        )
         self.engine = TradeEngine(
             strategy=self.strategy,
             selector=self.selector,
@@ -292,6 +297,8 @@ class MainWindow(QMainWindow):
             log_fn=self._log,
         )
         self.engine.set_buy_limits(rebuy_after_sell_today=False, max_buy_per_symbol_today=1)
+        self.buy_decision_logger = BuyDecisionLogger(self.data_dir / "opportunity" / "buy_decisions.csv")
+        self.engine.set_decision_logger(self.buy_decision_logger)
         self.condition_map = {}
         self.condition_screens: dict[str, str] = {}
         self.condition_manager = ConditionManager()
@@ -870,7 +877,10 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
 
         report_widget = ReportsWidget(
-            self.history_store, reports_dir=reports_dir(self.data_dir), parent=self
+            self.history_store,
+            reports_dir=reports_dir(self.data_dir),
+            parent=self,
+            name_resolver=self._get_symbol_name,
         )
         self.main_tabs.addTab(wrap_tab(report_widget), "리포트")
 
@@ -3061,7 +3071,7 @@ class MainWindow(QMainWindow):
             )
 
     def _open_trade_history(self) -> None:
-        dialog = TradeHistoryDialog(self.history_store, self)
+        dialog = TradeHistoryDialog(self.history_store, self, name_resolver=self._get_symbol_name, data_dir=self.data_dir)
         dialog.exec_()
 
     def _load_monitor_snapshot(self) -> None:

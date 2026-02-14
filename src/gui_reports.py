@@ -45,6 +45,7 @@ class ReportsWidget(QWidget):
         self.store = store
         self.reports_dir = Path(reports_dir)
         (self.reports_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "exports").mkdir(parents=True, exist_ok=True)
         self._last_units = []
         self._last_symbol_perf = []
         self._last_daily = None
@@ -156,6 +157,17 @@ class ReportsWidget(QWidget):
         self.export_symbol_btn.clicked.connect(self._export_symbol_csv)
         self.export_daily_btn.clicked.connect(self._export_daily_csv)
 
+    def _resolve_name(self, code: str, name: str | None) -> str:
+        text = str(name or "").strip()
+        if text:
+            return text
+        try:
+            if self.name_resolver and code:
+                return str(self.name_resolver(code) or "").strip()
+        except Exception:
+            return ""
+        return ""
+
     def _set_signed_item(self, table: QTableWidget, row: int, col: int, value: float, fmt: str = "{:.2f}") -> None:
         text = fmt.format(value)
         item = QTableWidgetItem(text)
@@ -187,15 +199,23 @@ class ReportsWidget(QWidget):
         winloss_mode = self.winloss_combo.currentData()
 
         def work() -> None:
-            fills = load_fills(self.store, start_dt, end_dt, mode_filter=mode)
-            units = build_trade_units(fills, winloss_mode)
-            symbol_perf = summarize_by_symbol_units(units)
-            daily = summarize_daily_units(units)
-            self._last_units = units
-            self._last_symbol_perf = symbol_perf
-            self._last_daily = daily
-            self._update_tables(symbol_perf, daily, winloss_mode, fills, units)
-            self._save_snapshot(start_dt, end_dt, mode, winloss_mode, fills, units, symbol_perf, daily)
+            try:
+                fills = load_fills(self.store, start_dt, end_dt, mode_filter=mode)
+                units = build_trade_units(fills, winloss_mode)
+                symbol_perf = summarize_by_symbol_units(units)
+                daily = summarize_daily_units(units)
+                self._last_units = units
+                self._last_symbol_perf = symbol_perf
+                self._last_daily = daily
+                self._update_tables(symbol_perf, daily, winloss_mode, fills, units)
+                self._save_snapshot(start_dt, end_dt, mode, winloss_mode, fills, units, symbol_perf, daily)
+            except Exception as exc:
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.exception("[REPORT][ERROR] %s", exc)
+                QMessageBox.critical(self, "리포트 오류", f"리포트 생성 중 오류: {exc}")
+                return
 
         QTimer.singleShot(0, work)
 

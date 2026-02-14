@@ -77,6 +77,7 @@ from .logging_setup import configure_logging
 from .backup_manager import BackupManager
 from .gui_restore_wizard import RestoreWizard
 from .gui_reports import ReportsWidget
+from .buy_decision_logger import BuyDecisionLogger
 from .persistence import load_json, save_json
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,11 @@ class MainWindow(QMainWindow):
         else:
             print("[GUI] QAxContainer 가 없어 OpenAPI 위젯을 생성하지 않습니다.")
         self.selector = UniverseSelector(kiwoom_client=self.kiwoom_client)
-        paper_broker = PaperBroker(initial_cash=self.strategy.initial_cash, history_store=self.history_store)
+        paper_broker = PaperBroker(
+            initial_cash=self.strategy.initial_cash,
+            history_store=self.history_store,
+            name_resolver=self._get_symbol_name,
+        )
         self.engine = TradeEngine(
             strategy=self.strategy,
             selector=self.selector,
@@ -292,6 +297,8 @@ class MainWindow(QMainWindow):
             log_fn=self._log,
         )
         self.engine.set_buy_limits(rebuy_after_sell_today=False, max_buy_per_symbol_today=1)
+        self.buy_decision_logger = BuyDecisionLogger(self.data_dir / "opportunity" / "buy_decisions.csv")
+        self.engine.set_decision_logger(self.buy_decision_logger)
         self.condition_map = {}
         self.condition_screens: dict[str, str] = {}
         self.condition_manager = ConditionManager()
@@ -351,6 +358,7 @@ class MainWindow(QMainWindow):
         self._last_realreg_set: set[str] = set()
         self._last_realreg_ts: float = 0.0
         self.realreg_limit = 100
+        self._no_buy_history: list[dict] = []
 
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_cycle)
@@ -665,6 +673,7 @@ class MainWindow(QMainWindow):
         self.monitor_refresh_btn = QPushButton("현재결과 새로고침")
         self.monitor_reset_btn = QPushButton("이벤트 초기화")
         self.monitor_export_btn = QPushButton("CSV 내보내기")
+        self.no_buy_reason_btn = QPushButton("미매수 사유")
         self.monitor_status_label = QLabel(
             "조건 실행(실시간 포함)을 누르면 현재결과/편입/편출 이벤트가 표시됩니다."
         )
@@ -673,6 +682,7 @@ class MainWindow(QMainWindow):
         monitor_controls.addWidget(self.monitor_refresh_btn)
         monitor_controls.addWidget(self.monitor_reset_btn)
         monitor_controls.addWidget(self.monitor_export_btn)
+        monitor_controls.addWidget(self.no_buy_reason_btn)
         monitor_controls.addWidget(self.monitor_status_label)
         monitor_layout.addLayout(monitor_controls)
 
@@ -867,7 +877,10 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(wrap_tab(tab_log), "로그")
 
         report_widget = ReportsWidget(
-            self.history_store, reports_dir=reports_dir(self.data_dir), parent=self
+            self.history_store,
+            reports_dir=reports_dir(self.data_dir),
+            parent=self,
+            name_resolver=self._get_symbol_name,
         )
         self.main_tabs.addTab(wrap_tab(report_widget), "리포트")
 
@@ -911,6 +924,7 @@ class MainWindow(QMainWindow):
         self.monitor_refresh_btn.clicked.connect(self._refresh_monitor_results)
         self.monitor_reset_btn.clicked.connect(self._reset_monitor_events)
         self.monitor_export_btn.clicked.connect(self._export_monitor_csv)
+        self.no_buy_reason_btn.clicked.connect(self._open_no_buy_history)
         self.monitor_condition_combo.currentIndexChanged.connect(self._refresh_monitor_results)
         self.universe_mode_combo.currentIndexChanged.connect(self._on_universe_mode_changed)
         self.test_add_btn.clicked.connect(self._add_test_symbols)
@@ -2213,6 +2227,7 @@ class MainWindow(QMainWindow):
             if not allow_orders:
                 self._log("[자동매매] 주문 비활성 상태 → 평가만 수행 또는 스킵")
             self.engine.run_once("combined", allow_orders=allow_orders)
+            self._record_no_buy_reasons("run_once", len(universe))
             self._refresh_account_and_positions()
             QTimer.singleShot(200, self._refresh_account_and_positions)
             self._log(f"테스트 실행 1회 완료 ({len(self.strategy.positions)}개 보유)")
@@ -2313,6 +2328,45 @@ class MainWindow(QMainWindow):
         self.trading_orders_enabled = False
         self._auto_condition_bootstrap_done = False
 
+    def _record_no_buy_reasons(self, context: str, universe_count: int) -> None:
+        debug = getattr(self.strategy, "last_entry_debug", {}) or {}
+        skip_counts = debug.get("skip_counts", {}) or {}
+        total_skips = sum(int(v) for v in skip_counts.values()) if skip_counts else 0
+        if total_skips <= 0:
+            return
+        rec = {
+            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "context": context,
+            "universe": int(universe_count),
+            "skips": {k: int(v) for k, v in skip_counts.items()},
+            "samples": list(debug.get("samples", []) or [])[:5],
+        }
+        self._no_buy_history.append(rec)
+        if len(self._no_buy_history) > 500:
+            self._no_buy_history = self._no_buy_history[-500:]
+        self._log(f"[NO_BUY] context={context} universe={universe_count} skips={rec['skips']} samples={rec['samples']}")
+
+    def _open_no_buy_history(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("미매수 사유 이력")
+        dlg.resize(860, 420)
+        lay = QVBoxLayout(dlg)
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["시각", "컨텍스트", "유니버스", "스킵요약", "샘플"])
+        rows = list(self._no_buy_history)
+        table.setRowCount(len(rows))
+        for i, rec in enumerate(rows):
+            table.setItem(i, 0, QTableWidgetItem(str(rec.get("ts", ""))))
+            table.setItem(i, 1, QTableWidgetItem(str(rec.get("context", ""))))
+            table.setItem(i, 2, QTableWidgetItem(str(rec.get("universe", 0))))
+            skips = rec.get("skips", {}) or {}
+            skip_txt = ", ".join([f"{k}:{v}" for k, v in skips.items()])
+            table.setItem(i, 3, QTableWidgetItem(skip_txt))
+            table.setItem(i, 4, QTableWidgetItem(", ".join([str(x) for x in (rec.get("samples", []) or [])])))
+        table.resizeColumnsToContents()
+        lay.addWidget(table)
+        dlg.exec_()
+
     def _on_cycle(self) -> None:
         if self._engine_busy:
             self._log("[ENGINE_BUSY] skip: already running (context=AUTO_CYCLE)")
@@ -2385,6 +2439,7 @@ class MainWindow(QMainWindow):
             if not allow_orders:
                 self._log("[자동매매] 감시모드: 주문 차단 상태로 평가만 진행 또는 스킵")
             self.engine.run_once("combined", allow_orders=allow_orders)
+            self._record_no_buy_reasons("auto_cycle", len(universe))
             self._refresh_account_and_positions()
 
         self._run_engine_task("AUTO_CYCLE", run)
@@ -3016,7 +3071,7 @@ class MainWindow(QMainWindow):
             )
 
     def _open_trade_history(self) -> None:
-        dialog = TradeHistoryDialog(self.history_store, self)
+        dialog = TradeHistoryDialog(self.history_store, self, name_resolver=self._get_symbol_name, data_dir=self.data_dir)
         dialog.exec_()
 
     def _load_monitor_snapshot(self) -> None:

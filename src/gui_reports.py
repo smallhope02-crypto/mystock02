@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -34,7 +35,11 @@ from .trade_history_store import TradeHistoryStore
 
 class ReportsWidget(QWidget):
     def __init__(
-        self, store: TradeHistoryStore, reports_dir: Path | str, parent: Optional[QWidget] = None
+        self,
+        store: TradeHistoryStore,
+        reports_dir: Path | str,
+        parent: Optional[QWidget] = None,
+        name_resolver=None,
     ) -> None:
         super().__init__(parent)
         self.store = store
@@ -43,6 +48,7 @@ class ReportsWidget(QWidget):
         self._last_units = []
         self._last_symbol_perf = []
         self._last_daily = None
+        self.name_resolver = name_resolver
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -91,7 +97,7 @@ class ReportsWidget(QWidget):
 
         self.tabs = QTabWidget()
 
-        self.symbol_table = QTableWidget(0, 18)
+        self.symbol_table = QTableWidget(0, 19)
         self.symbol_table.setHorizontalHeaderLabels(
             [
                 "종목코드",
@@ -112,6 +118,7 @@ class ReportsWidget(QWidget):
                 "평균실패",
                 "PF(프로핏팩터)",
                 "평균보유(분)",
+                "최근거래이력",
             ]
         )
         self.symbol_table.setSortingEnabled(True)
@@ -149,6 +156,36 @@ class ReportsWidget(QWidget):
         self.export_symbol_btn.clicked.connect(self._export_symbol_csv)
         self.export_daily_btn.clicked.connect(self._export_daily_csv)
 
+    def _resolve_name(self, code: str, name: str | None) -> str:
+        text = str(name or "").strip()
+        if text:
+            return text
+        try:
+            if self.name_resolver and code:
+                return str(self.name_resolver(code) or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _set_signed_item(self, table: QTableWidget, row: int, col: int, value: float, fmt: str = "{:.2f}") -> None:
+        text = fmt.format(value)
+        item = QTableWidgetItem(text)
+        if value > 0:
+            item.setForeground(QColor("red"))
+        elif value < 0:
+            item.setForeground(QColor("blue"))
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        table.setItem(row, col, item)
+
+    def _recent_unit_history(self, units, code: str, limit: int = 3) -> str:
+        rows = [u for u in units if u.code == code]
+        rows.sort(key=lambda x: x.exit_ts, reverse=True)
+        chunks = []
+        for u in rows[:limit]:
+            tag = "성공" if u.net_pnl > 0 else "실패" if u.net_pnl < 0 else "보합"
+            chunks.append(f"{u.exit_ts.strftime('%m-%d %H:%M')} {tag} {u.net_pnl:+,}")
+        return " | ".join(chunks)
+
     def _set_today(self) -> None:
         today = datetime.date.today()
         self.start_date.setDate(today)
@@ -184,7 +221,7 @@ class ReportsWidget(QWidget):
         self.symbol_table.setRowCount(len(symbol_perf))
         for row_idx, perf in enumerate(symbol_perf):
             self.symbol_table.setItem(row_idx, 0, QTableWidgetItem(perf.code))
-            self.symbol_table.setItem(row_idx, 1, QTableWidgetItem(perf.name or ""))
+            self.symbol_table.setItem(row_idx, 1, QTableWidgetItem(self._resolve_name(perf.code, perf.name)))
             self.symbol_table.setItem(row_idx, 2, QTableWidgetItem(str(perf.trades)))
             self.symbol_table.setItem(row_idx, 3, QTableWidgetItem(str(perf.wins)))
             self.symbol_table.setItem(row_idx, 4, QTableWidgetItem(str(perf.losses)))
@@ -195,14 +232,15 @@ class ReportsWidget(QWidget):
             self.symbol_table.setItem(row_idx, 8, QTableWidgetItem(f"{gross:,}"))
             self.symbol_table.setItem(row_idx, 9, QTableWidgetItem(f"{perf.fee_sum:,}"))
             self.symbol_table.setItem(row_idx, 10, QTableWidgetItem(f"{perf.tax_sum:,}"))
-            self.symbol_table.setItem(row_idx, 11, QTableWidgetItem(f"{perf.net_pnl_sum:,}"))
-            self.symbol_table.setItem(row_idx, 12, QTableWidgetItem(f"{perf.return_pct:.2f}"))
+            self._set_signed_item(self.symbol_table, row_idx, 11, float(perf.net_pnl_sum), "{:+,.0f}")
+            self._set_signed_item(self.symbol_table, row_idx, 12, float(perf.return_pct), "{:+.2f}")
             self.symbol_table.setItem(row_idx, 13, QTableWidgetItem(f"{perf.avg_pnl:.2f}"))
             self.symbol_table.setItem(row_idx, 14, QTableWidgetItem(f"{perf.avg_win:.2f}"))
             self.symbol_table.setItem(row_idx, 15, QTableWidgetItem(f"{perf.avg_loss:.2f}"))
             self.symbol_table.setItem(row_idx, 16, QTableWidgetItem(f"{perf.profit_factor:.2f}"))
             hold = perf.avg_hold_minutes if perf.avg_hold_minutes is not None else 0.0
             self.symbol_table.setItem(row_idx, 17, QTableWidgetItem(f"{hold:.1f}"))
+            self.symbol_table.setItem(row_idx, 18, QTableWidgetItem(self._recent_unit_history(units, perf.code)))
         self.symbol_table.resizeColumnsToContents()
 
         if not units:
@@ -274,7 +312,7 @@ class ReportsWidget(QWidget):
                 "symbol_perf_top": [
                     {
                         "code": p.code,
-                        "name": p.name,
+                        "name": self._resolve_name(p.code, p.name),
                         "trades": p.trades,
                         "wins": p.wins,
                         "losses": p.losses,
@@ -301,10 +339,10 @@ class ReportsWidget(QWidget):
         table.setRowCount(len(rows))
         for idx, perf in enumerate(rows):
             table.setItem(idx, 0, QTableWidgetItem(perf.code))
-            table.setItem(idx, 1, QTableWidgetItem(perf.name or ""))
+            table.setItem(idx, 1, QTableWidgetItem(self._resolve_name(perf.code, perf.name)))
             table.setItem(idx, 2, QTableWidgetItem(str(perf.trades)))
             table.setItem(idx, 3, QTableWidgetItem(f"{perf.win_rate:.2f}"))
-            table.setItem(idx, 4, QTableWidgetItem(f"{perf.net_pnl_sum:,}"))
+            self._set_signed_item(table, idx, 4, float(perf.net_pnl_sum), "{:+,.0f}")
         table.resizeColumnsToContents()
 
     def _export_symbol_csv(self) -> None:
@@ -323,7 +361,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공": perf.wins,
                     "실패": perf.losses,
@@ -340,6 +378,7 @@ class ReportsWidget(QWidget):
                     "평균실패": round(perf.avg_loss, 2),
                     "PF": round(perf.profit_factor, 2),
                     "평균보유(분)": round(perf.avg_hold_minutes or 0, 2),
+                    "최근거래이력": self._recent_unit_history(self._last_units, perf.code),
                 }
             )
         self._write_csv(Path(path_str), rows, meta=f"기간={self.start_date.text()}~{self.end_date.text()} 모드={self.mode_combo.currentText()} 승패={self.winloss_combo.currentText()}")
@@ -384,7 +423,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공률": round(perf.win_rate, 2),
                     "실현손익(세후)": perf.net_pnl_sum,
@@ -396,7 +435,7 @@ class ReportsWidget(QWidget):
             rows.append(
                 {
                     "종목코드": perf.code,
-                    "종목명": perf.name or "",
+                    "종목명": self._resolve_name(perf.code, perf.name),
                     "거래수": perf.trades,
                     "성공률": round(perf.win_rate, 2),
                     "실현손익(세후)": perf.net_pnl_sum,

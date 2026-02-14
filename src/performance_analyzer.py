@@ -102,6 +102,13 @@ def load_fills(
     end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     rows = store.query_events(start, end, mode=mode_filter, limit=10000, order_by="created_at ASC")
     fills: List[Fill] = []
+    code_name_map: Dict[str, str] = {}
+    for row in rows:
+        code = str(row.get("code", "") or "").strip()
+        name = str(row.get("name", "") or "").strip()
+        if code and name:
+            code_name_map[code] = name
+
     skipped: Dict[str, int] = {
         "missing_price": 0,
         "missing_qty": 0,
@@ -133,7 +140,7 @@ def load_fills(
                     ts=ts,
                     mode=str(row.get("mode", "")),
                     code=str(row.get("code", "")),
-                    name=row.get("name"),
+                    name=row.get("name") or code_name_map.get(str(row.get("code", "") or "")),
                     side=side,
                     price=price,
                     qty=qty,
@@ -172,7 +179,7 @@ def load_fills(
                     ts=ts,
                     mode=str(row.get("mode", "")),
                     code=str(row.get("code", "")),
-                    name=row.get("name"),
+                    name=row.get("name") or code_name_map.get(str(row.get("code", "") or "")),
                     side=side,
                     price=price,
                     qty=qty,

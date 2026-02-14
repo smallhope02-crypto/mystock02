@@ -32,11 +32,17 @@ class PaperPosition:
 class PaperBroker:
     """Lightweight in-memory broker for paper trading."""
 
-    def __init__(self, initial_cash: float = 1_000_000, history_store: TradeHistoryStore | None = None):
+    def __init__(
+        self,
+        initial_cash: float = 1_000_000,
+        history_store: TradeHistoryStore | None = None,
+        name_resolver=None,
+    ):
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.positions: Dict[str, PaperPosition] = {}
         self.history_store = history_store
+        self.name_resolver = name_resolver
 
     def set_cash(self, cash: float) -> None:
         self.initial_cash = float(cash)
@@ -97,16 +103,27 @@ class PaperBroker:
         position.quantity = new_total
         logger.info("[PAPER] Bought %s x%d at %.2f", symbol, quantity, price)
         if self.history_store and quantity:
-            self.history_store.insert_event(
-                {
-                    "mode": "paper",
-                    "event_type": "paper_fill",
-                    "code": symbol,
-                    "side": "buy",
-                    "exec_price": int(price),
-                    "exec_qty": int(quantity),
-                }
-            )
+            event_dict = {
+                "mode": "paper",
+                "event_type": "paper_fill",
+                "code": symbol,
+                "side": "buy",
+                "exec_price": int(price),
+                "exec_qty": int(quantity),
+                "name": "",
+            }
+            resolved = ""
+            try:
+                if getattr(self, "name_resolver", None):
+                    resolved = (self.name_resolver(symbol) or "").strip()
+            except Exception:
+                resolved = ""
+            if "name" not in event_dict:
+                event_dict["name"] = resolved
+            else:
+                if not str(event_dict.get("name") or "").strip():
+                    event_dict["name"] = resolved
+            self.history_store.insert_event(event_dict)
         return PaperOrderResult(symbol=symbol, quantity=quantity, price=price, status="filled")
 
     def send_sell_order(self, symbol: str, quantity: int, price: float) -> PaperOrderResult:
@@ -122,16 +139,27 @@ class PaperBroker:
             del self.positions[symbol]
         logger.info("[PAPER] Sold %s x%d at %.2f", symbol, sell_qty, price)
         if self.history_store and sell_qty:
-            self.history_store.insert_event(
-                {
-                    "mode": "paper",
-                    "event_type": "paper_fill",
-                    "code": symbol,
-                    "side": "sell",
-                    "exec_price": int(price),
-                    "exec_qty": int(sell_qty),
-                }
-            )
+            event_dict = {
+                "mode": "paper",
+                "event_type": "paper_fill",
+                "code": symbol,
+                "side": "sell",
+                "exec_price": int(price),
+                "exec_qty": int(sell_qty),
+                "name": "",
+            }
+            resolved = ""
+            try:
+                if getattr(self, "name_resolver", None):
+                    resolved = (self.name_resolver(symbol) or "").strip()
+            except Exception:
+                resolved = ""
+            if "name" not in event_dict:
+                event_dict["name"] = resolved
+            else:
+                if not str(event_dict.get("name") or "").strip():
+                    event_dict["name"] = resolved
+            self.history_store.insert_event(event_dict)
         return PaperOrderResult(symbol=symbol, quantity=sell_qty, price=price, status="filled")
 
     def get_account_summary(self) -> Dict[str, float]:

@@ -201,7 +201,7 @@ def summarize_by_symbol_units(units: Iterable[TradeUnit]) -> List[SymbolUnitPerf
         )
         fee_sum = sum(lot.fee for lot in lots)
         tax_sum = sum(lot.tax for lot in lots)
-        name = lots[0].name if lots else None
+        name = next((lot.name for lot in lots if lot.name), lots[0].name if lots else None)
         results.append(
             SymbolUnitPerf(
                 code=code,

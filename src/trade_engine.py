@@ -17,6 +17,7 @@ from .strategy import Order, Strategy
 from .price_tick import shift_price_by_ticks
 from .paper_broker import PaperPosition
 from .strategy import Position
+from .buy_decision_logger import BuyDecisionLogger
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class TradeEngine:
         self._tz = self._get_kst_timezone()
         self.buy_order_mode: str = "market"
         self.buy_price_offset_ticks: int = 0
+        self.decision_logger: BuyDecisionLogger | None = None
         if hasattr(self.selector, "attach_client"):
             self.selector.attach_client(self.kiwoom_client)
 
@@ -71,6 +73,9 @@ class TradeEngine:
     def set_buy_limits(self, rebuy_after_sell_today: bool, max_buy_per_symbol_today: int) -> None:
         self.rebuy_after_sell_today = bool(rebuy_after_sell_today)
         self.max_buy_per_symbol_today = int(max_buy_per_symbol_today)
+
+    def set_decision_logger(self, decision_logger: BuyDecisionLogger | None) -> None:
+        self.decision_logger = decision_logger
 
     def update_credentials(self, config: AppConfig) -> None:
         """Forward updated Kiwoom credentials to the client."""
@@ -118,11 +123,37 @@ class TradeEngine:
         self._execute_orders(exit_orders, allow_orders=allow_orders)
 
         entry_orders = self.strategy.evaluate_entry(universe, self._entry_price_lookup)
+        debug = getattr(self.strategy, "last_entry_debug", {}) or {}
         if self.log_fn:
-            debug = getattr(self.strategy, "last_entry_debug", {}) or {}
             self.log_fn(
                 f"[ENGINE] entry_orders={len(entry_orders)} budget_per_slot={debug.get('budget_per_slot')} skips={debug.get('skip_counts')} samples={debug.get('samples')}"
             )
+
+        if self.decision_logger and len(universe) > 0 and len(entry_orders) == 0:
+            records = []
+            skip_counts = debug.get("skip_counts", {}) or {}
+            samples = list(debug.get("samples", []) or [])
+            if samples:
+                for sym in samples[:10]:
+                    records.append(
+                        {
+                            "context": condition_name,
+                            "symbol": str(sym),
+                            "reason": "no_entry_order",
+                            "detail": f"skips={skip_counts}",
+                        }
+                    )
+            else:
+                records.append(
+                    {
+                        "context": condition_name,
+                        "symbol": "",
+                        "reason": "no_entry_order",
+                        "detail": f"universe={len(universe)} skips={skip_counts}",
+                    }
+                )
+            self.decision_logger.append(records)
+
         self._execute_orders(entry_orders, allow_orders=allow_orders)
 
         # Keep strategy cash aligned to the active broker's view

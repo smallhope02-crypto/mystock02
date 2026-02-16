@@ -1472,6 +1472,11 @@ class MainWindow(QMainWindow):
     def _on_openapi_login_result(self, err_code: int) -> None:
         if err_code == 0:
             self._log("[조건] OpenAPI 로그인 성공 - 조건식 로딩 진행")
+            self._name_cache.clear()
+            self._log("[NAME_RESOLVE] OpenAPI 로그인 성공으로 종목명 캐시를 초기화했습니다.")
+            if hasattr(self.kiwoom_client, "clear_master_name_cache"):
+                self.kiwoom_client.clear_master_name_cache()
+                self._log("[NAME_RESOLVE] KiwoomClient master name cache 초기화 완료")
             if self.openapi_widget:
                 self.openapi_widget.request_account_list()
                 raw = self.openapi_widget.get_server_gubun_raw()
@@ -3237,14 +3242,21 @@ class MainWindow(QMainWindow):
                     values.append(item.text() if item else "")
                 writer.writerow(values)
     def _get_symbol_name(self, code: str) -> str:
-        if code in self._name_cache:
-            return self._name_cache[code]
+        cached = self._name_cache.get(code)
+        if cached and not str(cached).upper().startswith("UNKNOWN-"):
+            return cached
         try:
             name = self.kiwoom_client.get_master_name(code)
         except Exception as exc:  # pragma: no cover - GUI fallback
             self._log(f"[시세] 종목명 조회 실패({code}): {exc}")
             name = f"UNKNOWN-{code}"
+        # 캐시에 저장하되, UNKNOWN은 추후 재조회 가능하도록 위 조건에서 걸러짐
         self._name_cache[code] = name
+        if str(name).upper().startswith("UNKNOWN-"):
+            self._log(
+                f"[NAME_RESOLVE] fallback UNKNOWN code={code} "
+                f"(openapi_connected={getattr(getattr(self.kiwoom_client, 'openapi', None), 'connected', False)})"
+            )
         return name
 
     def _refresh_positions(self, market_open: Optional[bool] = None) -> None:

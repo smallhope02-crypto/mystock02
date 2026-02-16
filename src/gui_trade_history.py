@@ -159,14 +159,17 @@ class TradeHistoryDialog(QDialog):
 
     def _resolve_name(self, code: str, name: str | None) -> str:
         text = str(name or "").strip()
-        if text:
+        # UNKNOWN-* 는 ‘미해결’로 보고 재조회 시도
+        if text and not text.upper().startswith("UNKNOWN-"):
             return text
         try:
             if self.name_resolver and code:
-                return str(self.name_resolver(code) or "").strip()
+                resolved = str(self.name_resolver(code) or "").strip()
+                if resolved and not resolved.upper().startswith("UNKNOWN-"):
+                    return resolved
         except Exception:
-            return ""
-        return ""
+            pass
+        return text  # UNKNOWN이거나 빈 값이면 그대로
 
     @staticmethod
     def _format_side(row: dict) -> str:

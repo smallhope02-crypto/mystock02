@@ -443,25 +443,38 @@ class KiwoomClient:
         return {"cash": 0.0, "equity": 0.0, "pnl": 0.0}
 
     # -- Master data ---------------------------------------------------
+    def clear_master_name_cache(self) -> None:
+        self._master_name_cache.clear()
+
     def get_master_name(self, code: str) -> str:
         """Return the security name for a code, with a small cache."""
 
-        if code in self._master_name_cache:
-            return self._master_name_cache[code]
+        cached = self._master_name_cache.get(code)
+        if cached and not str(cached).upper().startswith("UNKNOWN-"):
+            return cached
 
         name = ""
-        if self.openapi and self.openapi.connected and sys.platform.startswith("win"):
+        # connected 여부와 무관하게 시도는 하되, 실패/빈값이면 fallback
+        if self.openapi and sys.platform.startswith("win"):
             self.use_openapi = True
             try:
                 ax = getattr(self.openapi, "ax", None)
                 if ax and hasattr(ax, "dynamicCall"):
-                    name = str(ax.dynamicCall("GetMasterCodeName(QString)", code) or "")
+                    name = str(ax.dynamicCall("GetMasterCodeName(QString)", code) or "").strip()
             except Exception as exc:  # pragma: no cover - runtime dependent
                 logger.warning("GetMasterCodeName 실패(%s): %s", code, exc)
 
-        if not name:
-            # Dummy fallback for environments without live master data
-            name = f"UNKNOWN-{code}"
+        if name:
+            self._master_name_cache[code] = name
+            return name
 
-        self._master_name_cache[code] = name
-        return name
+        unk = f"UNKNOWN-{code}"
+        # UNKNOWN도 캐시에 넣되, 상단 로직에서 UNKNOWN이면 재시도하도록 했으므로 고착되지 않음
+        self._master_name_cache[code] = unk
+        logger.info(
+            "[NAME_RESOLVE] master fallback UNKNOWN code=%s openapi=%s connected=%s",
+            code,
+            bool(self.openapi),
+            getattr(self.openapi, "connected", False) if self.openapi else False,
+        )
+        return unk

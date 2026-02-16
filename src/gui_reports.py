@@ -160,15 +160,17 @@ class ReportsWidget(QWidget):
     def _resolve_name(self, code: str, name: str | None) -> str:
         """종목명 표시: 저장된 name 우선, 없으면 name_resolver(code)로 보정."""
         text = str(name or "").strip()
-        if text:
+        if text and not text.upper().startswith("UNKNOWN-"):
             return text
         resolver = getattr(self, "name_resolver", None)
         if resolver and code:
             try:
-                return str(resolver(code) or "").strip()
+                resolved = str(resolver(code) or "").strip()
+                if resolved and not resolved.upper().startswith("UNKNOWN-"):
+                    return resolved
             except Exception:
-                return ""
-        return ""
+                pass
+        return text
 
     def _set_signed_item(self, table: QTableWidget, row: int, col: int, value: float, fmt: str = "{:.2f}") -> None:
         text = fmt.format(value)

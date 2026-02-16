@@ -92,6 +92,7 @@ class TradeHistoryDialog(QDialog):
         button_row.addWidget(self.summary_label)
         root.addLayout(button_row)
 
+        # [FIX] tabs/event_layout 선생성: NameError/미정의 방지
         self.tabs = QTabWidget()
 
         event_tab = QWidget()

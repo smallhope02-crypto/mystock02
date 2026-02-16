@@ -158,14 +158,16 @@ class ReportsWidget(QWidget):
         self.export_daily_btn.clicked.connect(self._export_daily_csv)
 
     def _resolve_name(self, code: str, name: str | None) -> str:
+        """종목명 표시: 저장된 name 우선, 없으면 name_resolver(code)로 보정."""
         text = str(name or "").strip()
         if text:
             return text
-        try:
-            if self.name_resolver and code:
-                return str(self.name_resolver(code) or "").strip()
-        except Exception:
-            return ""
+        resolver = getattr(self, "name_resolver", None)
+        if resolver and code:
+            try:
+                return str(resolver(code) or "").strip()
+            except Exception:
+                return ""
         return ""
 
     def _set_signed_item(self, table: QTableWidget, row: int, col: int, value: float, fmt: str = "{:.2f}") -> None:
